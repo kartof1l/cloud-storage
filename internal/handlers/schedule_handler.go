@@ -22,14 +22,12 @@ func NewScheduleHandler(scheduleRepo *repository.ScheduleRepository, userRepo *r
 	}
 }
 
-// checkIsAdmin проверяет, является ли пользователь администратором
 func (h *ScheduleHandler) checkIsAdmin(c *gin.Context) bool {
 	userIDStr, exists := c.Get("user_id")
 	if !exists {
 		return false
 	}
 
-	// Преобразуем string в UUID
 	userID, err := uuid.Parse(userIDStr.(string))
 	if err != nil {
 		return false
@@ -40,28 +38,24 @@ func (h *ScheduleHandler) checkIsAdmin(c *gin.Context) bool {
 		return false
 	}
 
-	// Проверяем, есть ли пользователь в таблице администраторов библиотеки
 	var isAdmin bool
 	query := `SELECT EXISTS(SELECT 1 FROM library_admins WHERE email = $1)`
-	err = h.scheduleRepo.DB().QueryRow(query, user.Email).Scan(&isAdmin)
-	if err != nil {
-		return false
-	}
+	h.scheduleRepo.DB().QueryRow(query, user.Email).Scan(&isAdmin)
 	return isAdmin
 }
 
-// GetEvents - доступен всем авторизованным пользователям
-func (h *ScheduleHandler) GetEvents(c *gin.Context) {
-	events, err := h.scheduleRepo.GetAll()
+// GET /api/schedule/tasks
+func (h *ScheduleHandler) GetTasks(c *gin.Context) {
+	tasks, err := h.scheduleRepo.GetAllTasks()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, events)
+	c.JSON(http.StatusOK, tasks)
 }
 
-// CreateEvent - только для администраторов
-func (h *ScheduleHandler) CreateEvent(c *gin.Context) {
+// POST /api/schedule/tasks
+func (h *ScheduleHandler) CreateTask(c *gin.Context) {
 	if !h.checkIsAdmin(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
 		return
@@ -74,33 +68,28 @@ func (h *ScheduleHandler) CreateEvent(c *gin.Context) {
 		return
 	}
 
-	var event models.ScheduleEvent
-	if err := c.ShouldBindJSON(&event); err != nil {
+	var task models.ScheduleTask
+	if err := c.ShouldBindJSON(&task); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if event.Title == "" {
+	if task.Title == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
 		return
 	}
 
-	if event.EventDate == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "event date is required"})
-		return
-	}
-
-	event.CreatedBy = userID.String()
-	if err := h.scheduleRepo.Create(&event); err != nil {
+	task.CreatedBy = userID.String()
+	if err := h.scheduleRepo.CreateTask(&task); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, event)
+	c.JSON(http.StatusOK, task)
 }
 
-// UpdateEvent - только для администраторов
-func (h *ScheduleHandler) UpdateEvent(c *gin.Context) {
+// PUT /api/schedule/tasks/:id
+func (h *ScheduleHandler) UpdateTask(c *gin.Context) {
 	if !h.checkIsAdmin(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
 		return
@@ -108,28 +97,23 @@ func (h *ScheduleHandler) UpdateEvent(c *gin.Context) {
 
 	id := c.Param("id")
 
-	var event models.ScheduleEvent
-	if err := c.ShouldBindJSON(&event); err != nil {
+	var task models.ScheduleTask
+	if err := c.ShouldBindJSON(&task); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	if event.Title == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
-		return
-	}
-
-	event.ID = id
-	if err := h.scheduleRepo.Update(&event); err != nil {
+	task.ID = id
+	if err := h.scheduleRepo.UpdateTask(&task); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, event)
+	c.JSON(http.StatusOK, task)
 }
 
-// DeleteEvent - только для администраторов
-func (h *ScheduleHandler) DeleteEvent(c *gin.Context) {
+// PATCH /api/schedule/tasks/:id/toggle
+func (h *ScheduleHandler) ToggleTaskComplete(c *gin.Context) {
 	if !h.checkIsAdmin(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
 		return
@@ -137,7 +121,32 @@ func (h *ScheduleHandler) DeleteEvent(c *gin.Context) {
 
 	id := c.Param("id")
 
-	if err := h.scheduleRepo.Delete(id); err != nil {
+	var req struct {
+		Completed bool `json:"completed"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.scheduleRepo.ToggleTaskComplete(id, req.Completed); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "updated"})
+}
+
+// DELETE /api/schedule/tasks/:id
+func (h *ScheduleHandler) DeleteTask(c *gin.Context) {
+	if !h.checkIsAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	id := c.Param("id")
+
+	if err := h.scheduleRepo.DeleteTask(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

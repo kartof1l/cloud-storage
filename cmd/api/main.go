@@ -234,12 +234,14 @@ func main() {
 		}
 
 		// ========== РАСПИСАНИЕ МЕРОПРИЯТИЙ ==========
+		// ========== РАСПИСАНИЕ ЗАДАЧ ==========
 		schedule := protected.Group("/schedule")
 		{
-			schedule.GET("/events", rateLimitMiddleware(apiLimiter), scheduleHandler.GetEvents)
-			schedule.POST("/events", rateLimitMiddleware(apiLimiter), scheduleHandler.CreateEvent)
-			schedule.PUT("/events/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.UpdateEvent)
-			schedule.DELETE("/events/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.DeleteEvent)
+			schedule.GET("/tasks", rateLimitMiddleware(apiLimiter), scheduleHandler.GetTasks)
+			schedule.POST("/tasks", rateLimitMiddleware(apiLimiter), scheduleHandler.CreateTask)
+			schedule.PUT("/tasks/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.UpdateTask)
+			schedule.PATCH("/tasks/:id/toggle", rateLimitMiddleware(apiLimiter), scheduleHandler.ToggleTaskComplete)
+			schedule.DELETE("/tasks/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.DeleteTask)
 		}
 	}
 

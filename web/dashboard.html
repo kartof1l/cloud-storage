@@ -100,27 +100,45 @@
             <!-- Контент расписания -->
             <div id="scheduleContent" class="tab-content" style="display: none;">
                 <div class="schedule-header">
-                    <h2>📅 Расписание мероприятий</h2>
-                    <div id="adminScheduleControls" style="display: none;">
-                        <button class="btn btn-primary" onclick="showAddEventModal()">
-                            <span>➕</span> Добавить событие
-                        </button>
+                    <h2>📋 Мои задачи</h2>
+                    <div class="view-toggle">
+                        <button class="view-btn active" data-view="calendar" onclick="switchView('calendar')">📅 Календарь</button>
+                        <button class="view-btn" data-view="list" onclick="switchView('list')">📝 Список</button>
                     </div>
                 </div>
 
-                <!-- Навигация по неделям -->
-                <div class="week-nav">
-                    <button class="btn" onclick="changeWeek(-1)">◀ Предыдущая</button>
-                    <span class="current-week" id="currentWeekLabel">Неделя</span>
-                    <button class="btn" onclick="changeWeek(1)">Следующая ▶</button>
-                    <button class="btn" onclick="goToToday()">Сегодня</button>
+                <!-- Статистика -->
+                <div id="tasksStats" class="tasks-stats"></div>
+
+                <!-- Быстрое добавление (только для админов) -->
+                <div id="quickAddBlock" style="display: none;">
+                    <div class="quick-add-task">
+                        <input type="text" id="quickTaskTitle" placeholder="Новая задача...">
+                        <select id="quickTaskPriority">
+                            <option value="high">🔴 Высокий</option>
+                            <option value="medium" selected>🟡 Средний</option>
+                            <option value="low">🟢 Низкий</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="quickAddTask()">+ Добавить</button>
+                    </div>
                 </div>
 
-                <!-- Сетка расписания -->
-                <div class="schedule-grid" id="scheduleGrid"></div>
+                <!-- Календарный вид -->
+                <div id="calendarView" class="calendar-view active">
+                    <div class="week-nav">
+                        <button class="btn" onclick="changeWeek(-1)">◀ Предыдущая</button>
+                        <span class="current-week" id="currentWeekLabel">Неделя</span>
+                        <button class="btn" onclick="changeWeek(1)">Следующая ▶</button>
+                        <button class="btn" onclick="goToToday()">Сегодня</button>
+                    </div>
+                    <div class="schedule-grid" id="scheduleGrid"></div>
+                </div>
+
+                <!-- Списковый вид -->
+                <div id="listView" class="tasks-list">
+                    <div id="tasksListContainer"></div>
+                </div>
             </div>
-        </main>
-    </div>
 
     <div id="backNavZone" class="back-nav-zone hidden">
         <span>⬅️</span> Перетащите сюда для возврата
@@ -209,5 +227,41 @@
     <script nonce="{{ .CSPNonce }}" src="/js/common.js"></script>
     <script nonce="{{ .CSPNonce }}" src="/js/dashboard.js"></script>
     <script nonce="{{ .CSPNonce }}" src="/js/schedule.js"></script>
+    <!-- Модальное окно задачи -->
+<div class="modal" id="taskModal">
+    <div class="modal-content modal-content-large">
+        <div class="modal-title" id="taskModalTitle">➕ Новая задача</div>
+        <div class="task-form-group">
+            <label>Название задачи *</label>
+            <input type="text" id="taskTitle" placeholder="Что нужно сделать?">
+        </div>
+        <div class="task-form-group">
+            <label>Описание</label>
+            <textarea id="taskDescription" rows="2" placeholder="Дополнительные детали..."></textarea>
+        </div>
+        <div class="task-form-row">
+            <div class="task-form-group">
+                <label>Дата</label>
+                <input type="date" id="taskDueDate">
+            </div>
+            <div class="task-form-group">
+                <label>Время</label>
+                <input type="time" id="taskDueTime">
+            </div>
+        </div>
+        <div class="task-form-group">
+            <label>Приоритет</label>
+            <select id="taskPriority">
+                <option value="high">🔴 Высокий</option>
+                <option value="medium" selected>🟡 Средний</option>
+                <option value="low">🟢 Низкий</option>
+            </select>
+        </div>
+        <div class="modal-buttons">
+            <button class="btn" onclick="closeTaskModal()">Отмена</button>
+            <button class="btn btn-primary" onclick="saveTask()">Сохранить</button>
+        </div>
+    </div>
+</div>
 </body>
 </html>
