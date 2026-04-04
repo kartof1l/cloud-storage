@@ -58,6 +58,7 @@ func main() {
 	libRepo := repository.NewLibraryRepository(db)
 	auditRepo := repository.NewAuditRepository(db)
 	auditService := services.NewAuditService(auditRepo)
+	scheduleRepo := repository.NewScheduleRepository(db)
 
 	// Утилиты
 	jwtUtil := utils.NewJWTUtil(cfg.JWTSecret, cfg.JWTExpiresIn)
@@ -120,6 +121,7 @@ func main() {
 	libraryHandler := handlers.NewLibraryHandler(libraryService)
 	userHandler := handlers.NewUserHandler(userRepo, cfg.UploadPath)
 	adminHandler := handlers.NewAdminHandler(userRepo, auditService, libraryService, db)
+	scheduleHandler := handlers.NewScheduleHandler(scheduleRepo, userRepo)
 
 	oauthHandler := handlers.NewOAuthHandler(
 		googleProvider, yandexProvider, vkProvider,
@@ -229,6 +231,15 @@ func main() {
 			library.POST("/admins", rateLimitMiddleware(apiLimiter), libraryHandler.AddAdmin)
 			library.DELETE("/admins/:email", rateLimitMiddleware(apiLimiter), libraryHandler.RemoveAdmin)
 			library.GET("/stats", rateLimitMiddleware(apiLimiter), libraryHandler.GetLibraryStats)
+		}
+
+		// ========== РАСПИСАНИЕ МЕРОПРИЯТИЙ ==========
+		schedule := protected.Group("/schedule")
+		{
+			schedule.GET("/events", rateLimitMiddleware(apiLimiter), scheduleHandler.GetEvents)
+			schedule.POST("/events", rateLimitMiddleware(apiLimiter), scheduleHandler.CreateEvent)
+			schedule.PUT("/events/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.UpdateEvent)
+			schedule.DELETE("/events/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.DeleteEvent)
 		}
 	}
 

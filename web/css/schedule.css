@@ -1,0 +1,256 @@
+/* Стили для вкладок */
+.content-tabs {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border-glow);
+    padding-bottom: 12px;
+}
+
+.tab-btn {
+    padding: 10px 24px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-glow);
+    border-radius: 30px;
+    cursor: pointer;
+    transition: all 0.3s;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.tab-btn.active {
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: white;
+    border-color: transparent;
+}
+
+.tab-btn:hover {
+    transform: translateY(-2px);
+}
+
+/* Стили расписания */
+.schedule-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.schedule-header h2 {
+    font-size: 24px;
+    font-weight: 600;
+}
+
+.week-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.current-week {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 8px 20px;
+    background: var(--bg-card);
+    border-radius: 30px;
+    min-width: 200px;
+    text-align: center;
+}
+
+/* Сетка расписания - как прогноз погоды */
+.schedule-grid {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding: 8px 4px 20px 4px;
+}
+
+.schedule-day {
+    flex: 1;
+    min-width: 140px;
+    background: var(--bg-card);
+    backdrop-filter: blur(10px);
+    border-radius: 24px;
+    border: 1px solid var(--border-glow);
+    overflow: hidden;
+    transition: all 0.3s;
+}
+
+.schedule-day:hover {
+    transform: translateY(-4px);
+    border-color: var(--accent-primary);
+}
+
+.day-header {
+    padding: 16px 12px;
+    text-align: center;
+    border-bottom: 1px solid var(--border-glow);
+    background: rgba(110, 74, 255, 0.1);
+}
+
+.day-name {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.day-date {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.day-today {
+    background: linear-gradient(135deg, rgba(110, 74, 255, 0.2), rgba(155, 110, 255, 0.1));
+}
+
+.day-today .day-name {
+    color: var(--accent-primary);
+}
+
+.day-events {
+    padding: 12px;
+    min-height: 300px;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+.event-card {
+    background: var(--bg-primary);
+    border-radius: 16px;
+    padding: 12px;
+    margin-bottom: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    border-left: 3px solid var(--accent-primary);
+}
+
+.event-card:hover {
+    transform: translateX(4px);
+    background: rgba(110, 74, 255, 0.1);
+}
+
+.event-time {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-primary);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.event-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+
+.event-description {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+
+.event-type {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 9px;
+    font-weight: 500;
+}
+
+.event-type.meeting {
+    background: rgba(110, 74, 255, 0.2);
+    color: var(--accent-primary);
+}
+
+.event-type.deadline {
+    background: rgba(255, 77, 109, 0.2);
+    color: var(--danger);
+}
+
+.event-type.reminder {
+    background: rgba(255, 180, 71, 0.2);
+    color: var(--warning);
+}
+
+.event-type.other {
+    background: rgba(0, 214, 143, 0.2);
+    color: var(--success);
+}
+
+.event-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-glow);
+}
+
+.event-actions button {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 10px;
+    border-radius: 12px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.event-edit {
+    background: var(--accent-primary);
+    color: white;
+}
+
+.event-delete {
+    background: var(--danger);
+    color: white;
+}
+
+.event-edit:hover, .event-delete:hover {
+    transform: scale(1.02);
+}
+
+.empty-events {
+    text-align: center;
+    padding: 20px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+/* Адаптация для мобильных */
+@media (max-width: 768px) {
+    .schedule-grid {
+        flex-direction: column;
+    }
+    
+    .schedule-day {
+        min-width: 100%;
+    }
+    
+    .day-events {
+        max-height: 200px;
+    }
+    
+    .tab-btn {
+        padding: 8px 16px;
+        font-size: 12px;
+    }
+    
+    .week-nav {
+        gap: 8px;
+    }
+    
+    .current-week {
+        font-size: 12px;
+        min-width: 150px;
+    }
+}
