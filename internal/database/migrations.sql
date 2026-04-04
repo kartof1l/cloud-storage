@@ -126,3 +126,19 @@ CREATE TRIGGER trigger_update_folder_size
     AFTER INSERT OR UPDATE OF size, parent_folder_id OR DELETE ON files
     FOR EACH ROW
     EXECUTE FUNCTION update_parent_folder_size();
+
+-- Таблица для мероприятий расписания
+CREATE TABLE IF NOT EXISTS schedule_events (
+    id VARCHAR(36) PRIMARY KEY,
+    title VARCHAR(255) NOT NULL,
+    description TEXT,
+    event_date DATE NOT NULL,
+    event_time VARCHAR(10),
+    event_type VARCHAR(50) DEFAULT 'other',
+    created_by VARCHAR(36) REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_schedule_events_date ON schedule_events(event_date);
+CREATE INDEX idx_schedule_events_created_by ON schedule_events(created_by);

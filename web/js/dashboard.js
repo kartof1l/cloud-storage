@@ -35,7 +35,30 @@ async function loadUserInfo() {
         }
     } catch(e) { console.error(e); }
 }
-
+async function checkIfUserIsAdmin() {
+    const token = getToken();
+    if (!token) return false;
+    
+    try {
+        const res = await fetch('/api/library/admins', { 
+            headers: { 'Authorization': `Bearer ${token}` } 
+        });
+        
+        if (res.ok) {
+            const admins = await res.json();
+            isCurrentUserAdmin = admins.some(admin => admin.email === currentUser?.email);
+            window.isCurrentUserAdmin = isCurrentUserAdmin; // Добавьте эту строку
+            const adminNav = document.getElementById('navAdmin');
+            if (adminNav) {
+                adminNav.style.display = isCurrentUserAdmin ? 'flex' : 'none';
+            }
+        }
+    } catch(e) { 
+        console.error('Error checking admin status:', e);
+        const adminNav = document.getElementById('navAdmin');
+        if (adminNav) adminNav.style.display = 'none';
+    }
+}
 function showProfileModal() { 
     document.getElementById('editFirstName').value = currentUser?.first_name || ''; 
     document.getElementById('editLastName').value = currentUser?.last_name || ''; 
