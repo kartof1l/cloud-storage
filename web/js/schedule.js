@@ -30,15 +30,15 @@ function updateStats() {
     const pending = total - completed;
     const highPriority = tasksList.filter(t => t.priority === 'high' && !t.completed).length;
     
-    const statsHtml = `
-        <div class="stat-badge">📊 Всего: <span class="count">${total}</span></div>
-        <div class="stat-badge">✅ Выполнено: <span class="count">${completed}</span></div>
-        <div class="stat-badge">⏳ Осталось: <span class="count">${pending}</span></div>
-        <div class="stat-badge">🔴 Важных: <span class="count">${highPriority}</span></div>
-    `;
-    
     const statsContainer = document.getElementById('tasksStats');
-    if (statsContainer) statsContainer.innerHTML = statsHtml;
+    if (statsContainer) {
+        statsContainer.innerHTML = `
+            <div class="stat-badge">📊 Всего: <span class="count">${total}</span></div>
+            <div class="stat-badge">✅ Выполнено: <span class="count">${completed}</span></div>
+            <div class="stat-badge">⏳ Осталось: <span class="count">${pending}</span></div>
+            <div class="stat-badge">🔴 Важных: <span class="count">${highPriority}</span></div>
+        `;
+    }
 }
 
 // Переключение вида
@@ -46,10 +46,14 @@ function switchView(view) {
     currentView = view;
     
     document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
-    document.querySelector(`.view-btn[data-view="${view}"]`).classList.add('active');
+    const activeBtn = document.querySelector(`.view-btn[data-view="${view}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
     
-    document.getElementById('calendarView').classList.toggle('active', view === 'calendar');
-    document.getElementById('listView').classList.toggle('active', view === 'list');
+    const calendarView = document.getElementById('calendarView');
+    const listView = document.getElementById('listView');
+    
+    if (calendarView) calendarView.classList.toggle('active', view === 'calendar');
+    if (listView) listView.classList.toggle('active', view === 'list');
     
     if (view === 'list') {
         renderListView();
@@ -65,6 +69,59 @@ function renderCurrentView() {
         renderListView();
     }
     updateStats();
+}
+
+// Функции для работы с датами
+function getWeekDates(offset = 0) {
+    const today = new Date();
+    const currentDay = today.getDay();
+    const diffToMonday = currentDay === 0 ? -6 : 1 - currentDay;
+    
+    const monday = new Date(today);
+    monday.setDate(today.getDate() + diffToMonday + (offset * 7));
+    monday.setHours(0, 0, 0, 0);
+    
+    const weekDates = [];
+    for (let i = 0; i < 7; i++) {
+        const date = new Date(monday);
+        date.setDate(monday.getDate() + i);
+        weekDates.push(date);
+    }
+    return weekDates;
+}
+
+function formatDate(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function formatDisplayDate(date) {
+    const months = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+    return `${date.getDate()} ${months[date.getMonth()]}`;
+}
+
+function formatDisplayDateStr(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const months = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+    return `${date.getDate()} ${months[date.getMonth()]}`;
+}
+
+function getDayName(date) {
+    const days = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'];
+    return days[date.getDay() === 0 ? 6 : date.getDay() - 1];
+}
+
+function getPriorityIcon(priority) {
+    const icons = { high: '🔴', medium: '🟡', low: '🟢' };
+    return icons[priority] || '⚪';
+}
+
+function getPriorityName(priority) {
+    const names = { high: 'Высокий', medium: 'Средний', low: 'Низкий' };
+    return names[priority] || 'Обычный';
 }
 
 // Рендер календарного вида
@@ -205,70 +262,25 @@ function renderTaskItem(task) {
     `;
 }
 
-function formatDisplayDateStr(dateStr) {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    const months = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
-    return `${date.getDate()} ${months[date.getMonth()]}`;
-}
-
-// Вспомогательные функции для приоритетов
-function getPriorityIcon(priority) {
-    const icons = { high: '🔴', medium: '🟡', low: '🟢' };
-    return icons[priority] || '⚪';
-}
-
-function getPriorityName(priority) {
-    const names = { high: 'Высокий', medium: 'Средний', low: 'Низкий' };
-    return names[priority] || 'Обычный';
-}
-
-// Функции для работы с датами
-function getWeekDates(offset = 0) {
-    const today = new Date();
-    const currentDay = today.getDay();
-    const diffToMonday = currentDay === 0 ? -6 : 1 - currentDay;
-    
-    const monday = new Date(today);
-    monday.setDate(today.getDate() + diffToMonday + (offset * 7));
-    monday.setHours(0, 0, 0, 0);
-    
-    const weekDates = [];
-    for (let i = 0; i < 7; i++) {
-        const date = new Date(monday);
-        date.setDate(monday.getDate() + i);
-        weekDates.push(date);
-    }
-    return weekDates;
-}
-
-function formatDate(date) {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-}
-
-function formatDisplayDate(date) {
-    const months = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
-    return `${date.getDate()} ${months[date.getMonth()]}`;
-}
-
-function getDayName(date) {
-    const days = ['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'];
-    return days[date.getDay() === 0 ? 6 : date.getDay() - 1];
-}
-
 // CRUD операции
 function showTaskModal(prefilledDate = '') {
     editingTaskId = null;
-    document.getElementById('taskModalTitle').textContent = '➕ Новая задача';
-    document.getElementById('taskTitle').value = '';
-    document.getElementById('taskDescription').value = '';
-    document.getElementById('taskDueDate').value = prefilledDate || formatDate(new Date());
-    document.getElementById('taskDueTime').value = '';
-    document.getElementById('taskPriority').value = 'medium';
-    document.getElementById('taskModal').style.display = 'flex';
+    const modalTitle = document.getElementById('taskModalTitle');
+    const titleInput = document.getElementById('taskTitle');
+    const descInput = document.getElementById('taskDescription');
+    const dateInput = document.getElementById('taskDueDate');
+    const timeInput = document.getElementById('taskDueTime');
+    const prioritySelect = document.getElementById('taskPriority');
+    
+    if (modalTitle) modalTitle.textContent = '➕ Новая задача';
+    if (titleInput) titleInput.value = '';
+    if (descInput) descInput.value = '';
+    if (dateInput) dateInput.value = prefilledDate || formatDate(new Date());
+    if (timeInput) timeInput.value = '';
+    if (prioritySelect) prioritySelect.value = 'medium';
+    
+    const modal = document.getElementById('taskModal');
+    if (modal) modal.style.display = 'flex';
 }
 
 async function editTask(taskId) {
@@ -276,22 +288,37 @@ async function editTask(taskId) {
     if (!task) return;
     
     editingTaskId = taskId;
-    document.getElementById('taskModalTitle').textContent = '✏️ Редактировать задачу';
-    document.getElementById('taskTitle').value = task.title;
-    document.getElementById('taskDescription').value = task.description || '';
-    document.getElementById('taskDueDate').value = task.due_date || '';
-    document.getElementById('taskDueTime').value = task.due_time || '';
-    document.getElementById('taskPriority').value = task.priority || 'medium';
-    document.getElementById('taskModal').style.display = 'flex';
+    const modalTitle = document.getElementById('taskModalTitle');
+    const titleInput = document.getElementById('taskTitle');
+    const descInput = document.getElementById('taskDescription');
+    const dateInput = document.getElementById('taskDueDate');
+    const timeInput = document.getElementById('taskDueTime');
+    const prioritySelect = document.getElementById('taskPriority');
+    
+    if (modalTitle) modalTitle.textContent = '✏️ Редактировать задачу';
+    if (titleInput) titleInput.value = task.title;
+    if (descInput) descInput.value = task.description || '';
+    if (dateInput) dateInput.value = task.due_date || '';
+    if (timeInput) timeInput.value = task.due_time || '';
+    if (prioritySelect) prioritySelect.value = task.priority || 'medium';
+    
+    const modal = document.getElementById('taskModal');
+    if (modal) modal.style.display = 'flex';
 }
 
 async function saveTask() {
     const token = getToken();
-    const title = document.getElementById('taskTitle').value.trim();
-    const description = document.getElementById('taskDescription').value.trim();
-    const dueDate = document.getElementById('taskDueDate').value;
-    const dueTime = document.getElementById('taskDueTime').value;
-    const priority = document.getElementById('taskPriority').value;
+    const titleInput = document.getElementById('taskTitle');
+    const descInput = document.getElementById('taskDescription');
+    const dateInput = document.getElementById('taskDueDate');
+    const timeInput = document.getElementById('taskDueTime');
+    const prioritySelect = document.getElementById('taskPriority');
+    
+    const title = titleInput ? titleInput.value.trim() : '';
+    const description = descInput ? descInput.value.trim() : '';
+    const dueDate = dateInput ? dateInput.value : '';
+    const dueTime = timeInput ? timeInput.value : '';
+    const priority = prioritySelect ? prioritySelect.value : 'medium';
     
     if (!title) {
         alert('Введите название задачи');
@@ -319,7 +346,9 @@ async function saveTask() {
         if (res.ok) {
             closeTaskModal();
             loadTasks();
-            showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена');
+            if (typeof showToast === 'function') {
+                showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена');
+            }
         } else {
             const error = await res.json();
             alert('Ошибка: ' + (error.error || 'Неизвестная ошибка'));
@@ -344,7 +373,9 @@ async function toggleTaskComplete(taskId) {
         
         if (res.ok) {
             loadTasks();
-            showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉');
+            if (typeof showToast === 'function') {
+                showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉');
+            }
         }
     } catch(e) {
         console.error('Error toggling task:', e);
@@ -368,7 +399,9 @@ async function deleteTask(taskId) {
         
         if (res.ok) {
             loadTasks();
-            showToast('Задача удалена');
+            if (typeof showToast === 'function') {
+                showToast('Задача удалена');
+            }
         }
     } catch(e) {
         console.error('Error deleting task:', e);
@@ -376,11 +409,12 @@ async function deleteTask(taskId) {
 }
 
 function closeTaskModal() {
-    document.getElementById('taskModal').style.display = 'none';
+    const modal = document.getElementById('taskModal');
+    if (modal) modal.style.display = 'none';
     editingTaskId = null;
 }
 
-// Навигация
+// Навигация по неделям
 function changeWeek(delta) {
     currentWeekOffset += delta;
     renderCalendarView();
@@ -391,26 +425,21 @@ function goToToday() {
     renderCalendarView();
 }
 
-// Инициализация при переключении вкладки
-function initScheduleTab() {
-    loadTasks();
-    if (window.isCurrentUserAdmin) {
-        const adminControls = document.getElementById('adminScheduleControls');
-        if (adminControls) adminControls.style.display = 'block';
-    }
-}
+// Быстрое добавление
 function quickAddTask() {
-    const title = document.getElementById('quickTaskTitle').value.trim();
+    const titleInput = document.getElementById('quickTaskTitle');
+    const title = titleInput ? titleInput.value.trim() : '';
     if (!title) {
         alert('Введите название задачи');
         return;
     }
     
-    const priority = document.getElementById('quickTaskPriority').value;
+    const prioritySelect = document.getElementById('quickTaskPriority');
+    const priority = prioritySelect ? prioritySelect.value : 'medium';
     const dueDate = formatDate(new Date());
     
     saveTaskQuick(title, priority, dueDate);
-    document.getElementById('quickTaskTitle').value = '';
+    if (titleInput) titleInput.value = '';
 }
 
 async function saveTaskQuick(title, priority, dueDate) {
@@ -426,9 +455,53 @@ async function saveTaskQuick(title, priority, dueDate) {
         
         if (res.ok) {
             loadTasks();
-            showToast('Задача добавлена');
+            if (typeof showToast === 'function') {
+                showToast('Задача добавлена');
+            }
         }
     } catch(e) {
         console.error('Error:', e);
     }
 }
+
+// ========== ГЛАВНАЯ ФУНКЦИЯ ПЕРЕКЛЮЧЕНИЯ ВКЛАДОК ==========
+function switchContentTab(tab) {
+    console.log('Switching to tab:', tab);
+    
+    // Обновляем кнопки
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    const activeBtn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+    if (activeBtn) activeBtn.classList.add('active');
+    
+    // Обновляем контент
+    const filesContent = document.getElementById('filesContent');
+    const scheduleContent = document.getElementById('scheduleContent');
+    
+    if (filesContent) filesContent.style.display = tab === 'files' ? 'block' : 'none';
+    if (scheduleContent) scheduleContent.style.display = tab === 'schedule' ? 'block' : 'none';
+    
+    // Если переключились на расписание - инициализируем
+    if (tab === 'schedule') {
+        console.log('Initializing schedule tab...');
+        // Показываем кнопки админа
+        const quickAddBlock = document.getElementById('quickAddBlock');
+        if (quickAddBlock) {
+            quickAddBlock.style.display = window.isCurrentUserAdmin ? 'block' : 'none';
+        }
+        // Загружаем задачи
+        loadTasks();
+    }
+}
+
+// Инициализация при загрузке страницы
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('Schedule.js loaded');
+    
+    // Ждем пока isCurrentUserAdmin определится
+    setTimeout(function() {
+        if (window.isCurrentUserAdmin) {
+            const quickAddBlock = document.getElementById('quickAddBlock');
+            if (quickAddBlock) quickAddBlock.style.display = 'block';
+        }
+    }, 500);
+});
