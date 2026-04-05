@@ -462,7 +462,85 @@ tasks-stats {
     background: rgba(0, 214, 143, 0.2);
     color: var(--success);
 }
+/* Стили для кнопок действий */
+.task-action-btn {
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
 
+.task-action-btn:hover {
+    transform: scale(1.05);
+}
+
+.complete-btn {
+    background: var(--success);
+    color: white;
+}
+
+.revert-btn {
+    background: var(--warning);
+    color: white;
+}
+
+.edit-btn {
+    background: var(--accent-primary);
+    color: white;
+}
+
+.delete-btn {
+    background: var(--danger);
+    color: white;
+}
+
+.add-task-btn {
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: white;
+    border: none;
+}
+
+.add-task-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(110, 74, 255, 0.3);
+}
+
+/* Просроченные задачи */
+.task-item.overdue {
+    border-left: 3px solid var(--danger);
+    background: rgba(255, 77, 109, 0.05);
+}
+
+.task-item.completed {
+    opacity: 0.7;
+}
+
+/* Статистика */
+.tasks-stats {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.stat-badge {
+    background: var(--bg-card);
+    border-radius: 30px;
+    padding: 8px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stat-badge .count {
+    font-weight: 700;
+    color: var(--accent-primary);
+    font-size: 18px;
+}
 /* Адаптация для мобильных */
 @media (max-width: 768px) {
     .schedule-grid {
@@ -504,4 +582,83 @@ tasks-stats {
         grid-template-columns: 1fr;
         gap: 12px;
     }
+    /* Стили для кнопок действий */
+.task-action-btn {
+    padding: 4px 10px;
+    border-radius: 16px;
+    font-size: 10px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    border: none;
+}
+
+.task-action-btn:hover {
+    transform: scale(1.05);
+}
+
+.complete-btn {
+    background: var(--success);
+    color: white;
+}
+
+.revert-btn {
+    background: var(--warning);
+    color: white;
+}
+
+.edit-btn {
+    background: var(--accent-primary);
+    color: white;
+}
+
+.delete-btn {
+    background: var(--danger);
+    color: white;
+}
+
+.add-task-btn {
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: white;
+    border: none;
+}
+
+.add-task-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(110, 74, 255, 0.3);
+}
+
+/* Просроченные задачи */
+.task-item.overdue {
+    border-left: 3px solid var(--danger);
+    background: rgba(255, 77, 109, 0.05);
+}
+
+.task-item.completed {
+    opacity: 0.7;
+}
+
+/* Статистика */
+.tasks-stats {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.stat-badge {
+    background: var(--bg-card);
+    border-radius: 30px;
+    padding: 8px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stat-badge .count {
+    font-weight: 700;
+    color: var(--accent-primary);
+    font-size: 18px;
+}
 }
