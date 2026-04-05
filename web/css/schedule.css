@@ -1,71 +1,253 @@
-/* Стили для TimePicker */
-.time-picker-container {
-    margin: 12px 0;
-    padding: 12px;
-    background: var(--bg-card);
-    border-radius: 20px;
+/* ========== ОСНОВНЫЕ СТИЛИ ДЛЯ РАСПИСАНИЯ ========== */
+
+/* Вкладки */
+.content-tabs {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid rgba(110, 74, 255, 0.3);
+    padding-bottom: 12px;
 }
 
-.time-slider {
-    margin-bottom: 12px;
-}
-
-.time-slider input {
-    width: 100%;
-    height: 6px;
-    -webkit-appearance: none;
-    background: linear-gradient(90deg, var(--success), var(--warning), var(--danger));
-    border-radius: 3px;
-    outline: none;
-}
-
-.time-slider input::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background: var(--accent-primary);
+.tab-btn {
+    padding: 10px 24px;
+    background: rgba(20, 20, 40, 0.6);
+    border: 1px solid rgba(110, 74, 255, 0.3);
+    border-radius: 30px;
     cursor: pointer;
-    box-shadow: 0 0 10px var(--accent-primary);
+    font-size: 14px;
+    font-weight: 500;
+    color: #a0a0c0;
+    transition: all 0.3s;
 }
 
-.time-slider-labels {
+.tab-btn.active {
+    background: linear-gradient(135deg, #6e4aff, #9b6eff);
+    color: white;
+    border-color: transparent;
+}
+
+/* Заголовок расписания */
+.schedule-header {
     display: flex;
     justify-content: space-between;
-    margin-top: 8px;
-    font-size: 10px;
-    color: var(--text-muted);
-}
-
-.time-presets {
-    display: flex;
+    align-items: center;
+    margin-bottom: 24px;
     flex-wrap: wrap;
-    gap: 8px;
-    margin-top: 12px;
+    gap: 16px;
 }
 
-.time-preset {
-    padding: 6px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-glow);
-    border-radius: 20px;
-    font-size: 11px;
+.schedule-header h2 {
+    font-size: 24px;
+    font-weight: 600;
+    color: #f0f0ff;
+}
+
+/* Переключатель вида */
+.view-toggle {
+    display: flex;
+    gap: 8px;
+    background: rgba(20, 20, 40, 0.6);
+    border-radius: 30px;
+    padding: 4px;
+}
+
+.view-btn {
+    padding: 6px 16px;
+    background: transparent;
+    border: none;
+    border-radius: 30px;
     cursor: pointer;
+    font-size: 13px;
+    color: #a0a0c0;
     transition: all 0.2s;
 }
 
-.time-preset:hover {
-    background: var(--accent-primary);
-    transform: scale(1.02);
+.view-btn.active {
+    background: linear-gradient(135deg, #6e4aff, #9b6eff);
+    color: white;
 }
 
-/* Стили для карточек задач */
+/* Статистика */
+.tasks-stats {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.stat-badge {
+    background: rgba(20, 20, 40, 0.6);
+    border-radius: 30px;
+    padding: 8px 16px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #a0a0c0;
+}
+
+.stat-badge .count {
+    font-weight: 700;
+    color: #6e4aff;
+    font-size: 18px;
+}
+
+/* Быстрое добавление */
+.quick-add-task {
+    background: rgba(20, 20, 40, 0.6);
+    border-radius: 20px;
+    padding: 12px 16px;
+    margin-bottom: 24px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.quick-add-task input {
+    flex: 1;
+    background: #0a0a15;
+    border: 1px solid rgba(110, 74, 255, 0.3);
+    border-radius: 30px;
+    padding: 12px 16px;
+    color: #f0f0ff;
+    font-size: 14px;
+    outline: none;
+}
+
+.quick-add-task input:focus {
+    border-color: #6e4aff;
+}
+
+.quick-add-task select {
+    background: #0a0a15;
+    border: 1px solid rgba(110, 74, 255, 0.3);
+    border-radius: 30px;
+    padding: 12px 16px;
+    color: #f0f0ff;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+/* Навигация по неделям */
+.week-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    flex-wrap: wrap;
+}
+
+.current-week {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 8px 20px;
+    background: rgba(20, 20, 40, 0.6);
+    border-radius: 30px;
+    min-width: 200px;
+    text-align: center;
+    color: #f0f0ff;
+}
+
+/* Сетка календаря */
+.schedule-grid {
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding: 8px 4px 20px 4px;
+}
+
+/* Карточка дня */
+.schedule-day {
+    flex: 1;
+    min-width: 200px;
+    background: rgba(20, 20, 40, 0.6);
+    backdrop-filter: blur(10px);
+    border-radius: 24px;
+    border: 1px solid rgba(110, 74, 255, 0.3);
+    overflow: hidden;
+    transition: all 0.3s;
+}
+
+.schedule-day:hover {
+    transform: translateY(-4px);
+    border-color: #6e4aff;
+}
+
+/* Сегодняшний день */
+.day-today {
+    background: linear-gradient(135deg, rgba(110, 74, 255, 0.2), rgba(155, 110, 255, 0.1));
+    border-color: #6e4aff;
+    box-shadow: 0 0 20px rgba(110, 74, 255, 0.3);
+    animation: todayPulse 2s ease-in-out infinite;
+}
+
+@keyframes todayPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0.4); }
+    50% { box-shadow: 0 0 0 10px rgba(110, 74, 255, 0); }
+}
+
+.day-today .day-name {
+    color: #6e4aff !important;
+}
+
+/* Заголовок дня */
+.day-header {
+    padding: 16px 12px;
+    text-align: center;
+    border-bottom: 1px solid rgba(110, 74, 255, 0.3);
+    background: rgba(110, 74, 255, 0.1);
+}
+
+.day-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: #f0f0ff;
+    margin-bottom: 4px;
+}
+
+.day-date {
+    font-size: 12px;
+    color: #6a6a8a;
+}
+
+/* Контейнер событий */
+.day-events {
+    padding: 12px;
+    min-height: 300px;
+    max-height: 500px;
+    overflow-y: auto;
+}
+
+/* Кнопка добавления задачи */
+.add-task-btn {
+    width: 100%;
+    margin-bottom: 12px;
+    padding: 10px;
+    background: linear-gradient(135deg, #6e4aff, #9b6eff);
+    color: white;
+    border: none;
+    border-radius: 30px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.3s;
+}
+
+.add-task-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 15px rgba(110, 74, 255, 0.3);
+}
+
+/* Карточка задачи */
 .task-card {
-    background: var(--bg-primary);
+    background: #0a0a15;
     border-radius: 16px;
     padding: 12px;
     margin-bottom: 10px;
-    border-left: 3px solid var(--accent-primary);
+    border-left: 3px solid #6e4aff;
     transition: all 0.2s;
 }
 
@@ -74,10 +256,11 @@
     background: rgba(110, 74, 255, 0.1);
 }
 
+/* Время задачи */
 .task-card-time {
     font-size: 11px;
     font-weight: 600;
-    color: var(--accent-primary);
+    color: #6e4aff;
     margin-bottom: 8px;
     display: flex;
     align-items: center;
@@ -85,8 +268,9 @@
     flex-wrap: wrap;
 }
 
+/* Бейджи */
 .overdue-badge {
-    color: var(--danger);
+    color: #ff4d6d;
     background: rgba(255, 77, 109, 0.2);
     padding: 2px 6px;
     border-radius: 12px;
@@ -94,31 +278,35 @@
 }
 
 .completed-badge {
-    color: var(--success);
+    color: #00d68f;
     background: rgba(0, 214, 143, 0.2);
     padding: 2px 6px;
     border-radius: 12px;
     font-size: 9px;
 }
 
+/* Название задачи */
 .task-card-title {
     font-size: 13px;
     font-weight: 500;
     margin-bottom: 6px;
     word-break: break-word;
+    color: #f0f0ff;
 }
 
 .task-card-title.completed {
     text-decoration: line-through;
-    color: var(--text-muted);
+    color: #6a6a8a;
 }
 
+/* Описание */
 .task-card-desc {
     font-size: 10px;
-    color: var(--text-muted);
+    color: #6a6a8a;
     margin-bottom: 8px;
 }
 
+/* Футер карточки */
 .task-card-footer {
     display: flex;
     justify-content: space-between;
@@ -126,6 +314,7 @@
     margin-top: 8px;
 }
 
+/* Приоритет */
 .task-card-priority {
     display: inline-block;
     padding: 2px 8px;
@@ -136,19 +325,20 @@
 
 .task-card-priority.high {
     background: rgba(255, 77, 109, 0.2);
-    color: var(--danger);
+    color: #ff4d6d;
 }
 
 .task-card-priority.medium {
     background: rgba(255, 180, 71, 0.2);
-    color: var(--warning);
+    color: #ffb347;
 }
 
 .task-card-priority.low {
     background: rgba(0, 214, 143, 0.2);
-    color: var(--success);
+    color: #00d68f;
 }
 
+/* Кнопки действий */
 .task-card-actions {
     display: flex;
     gap: 6px;
@@ -167,30 +357,137 @@
     font-size: 12px;
 }
 
-.complete-btn { background: var(--success); color: white; }
-.revert-btn { background: var(--warning); color: white; }
-.edit-btn { background: var(--accent-primary); color: white; }
-.delete-btn { background: var(--danger); color: white; }
+.complete-btn { background: #00d68f; color: white; }
+.revert-btn { background: #ffb347; color: white; }
+.edit-btn { background: #6e4aff; color: white; }
+.delete-btn { background: #ff4d6d; color: white; }
 
-.add-task-btn {
-    width: 100%;
+.task-action-btn:hover {
+    transform: scale(1.05);
+}
+
+/* Пустое состояние */
+.empty-events {
+    text-align: center;
+    padding: 20px;
+    color: #6a6a8a;
+    font-size: 12px;
+}
+
+/* Списковый вид */
+.task-group {
+    margin-bottom: 24px;
+}
+
+.task-group-title {
+    font-size: 14px;
+    font-weight: 600;
     margin-bottom: 12px;
-    padding: 10px;
-    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-    color: white;
-    border: none;
-    border-radius: 30px;
+    padding: 8px 12px;
+    background: rgba(110, 74, 255, 0.1);
+    border-radius: 12px;
+    display: inline-block;
+    color: #f0f0ff;
+}
+
+.task-item {
+    background: rgba(20, 20, 40, 0.6);
+    border-radius: 16px;
+    padding: 14px 16px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    transition: all 0.2s;
+    border: 1px solid rgba(110, 74, 255, 0.3);
+}
+
+.task-item:hover {
+    transform: translateX(4px);
+    border-color: #6e4aff;
+}
+
+.task-checkbox {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid rgba(110, 74, 255, 0.3);
+    background: transparent;
     cursor: pointer;
-    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
 }
 
-.overdue-title {
-    background: rgba(255, 77, 109, 0.2);
-    color: var(--danger);
+.task-checkbox.completed {
+    background: #00d68f;
+    border-color: #00d68f;
 }
 
-.task-desc {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-top: 4px;
+.task-checkbox.completed::after {
+    content: '✓';
+    color: white;
+    font-size: 12px;
+}
+
+.task-content {
+    flex: 1;
+}
+
+.task-title {
+    font-size: 14px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    color: #f0f0ff;
+}
+
+.task-title.completed {
+    text-decoration: line-through;
+    color: #6a6a8a;
+}
+
+.task-meta {
+    display: flex;
+    gap: 12px;
+    font-size: 10px;
+    color: #6a6a8a;
+}
+
+.task-priority.high { color: #ff4d6d; }
+.task-priority.medium { color: #ffb347; }
+.task-priority.low { color: #00d68f; }
+
+/* Адаптация для мобильных */
+@media (max-width: 768px) {
+    .schedule-grid {
+        flex-direction: column;
+    }
+    
+    .schedule-day {
+        min-width: 100%;
+    }
+    
+    .day-events {
+        max-height: 300px;
+    }
+    
+    .tab-btn {
+        padding: 8px 16px;
+        font-size: 12px;
+    }
+    
+    .current-week {
+        font-size: 12px;
+        min-width: 150px;
+    }
+    
+    .quick-add-task {
+        flex-direction: column;
+    }
+    
+    .quick-add-task input,
+    .quick-add-task select {
+        width: 100%;
+    }
 }
