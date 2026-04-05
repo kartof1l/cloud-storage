@@ -5,12 +5,58 @@ let editingTaskId = null;
 let currentView = 'calendar';
 
 function isUserAdmin() {
-    return window.isCurrentUserAdmin === true;
+    // Прямая проверка глобальной переменной
+    if (typeof window.isCurrentUserAdmin !== 'undefined') {
+        return window.isCurrentUserAdmin === true;
+    }
+    // Проверка через localStorage на всякий случай
+    try {
+        const user = JSON.parse(localStorage.getItem('user') || '{}');
+        const admins = JSON.parse(localStorage.getItem('admins') || '[]');
+        if (admins.some(a => a.email === user.email)) return true;
+    } catch(e) {}
+    return false;
 }
-
+// Добавьте эту функцию в начало schedule.js
+async function forceCheckAdmin() {
+    const token = getToken();
+    if (!token) return false;
+    
+    try {
+        // Получаем текущего пользователя
+        const userRes = await fetch('/api/user/me', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!userRes.ok) return false;
+        const user = await userRes.json();
+        
+        // Получаем список админов
+        const adminsRes = await fetch('/api/library/admins', {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!adminsRes.ok) return false;
+        const admins = await adminsRes.json();
+        
+        const isAdmin = admins.some(a => a.email === user.email);
+        window.isCurrentUserAdmin = isAdmin;
+        
+        console.log('Force check - isAdmin:', isAdmin);
+        console.log('Force check - user email:', user.email);
+        console.log('Force check - admins:', admins.map(a => a.email));
+        
+        return isAdmin;
+    } catch(e) {
+        console.error('Force check error:', e);
+        return false;
+    }
+}
+// Измените loadTasks, добавив forceCheckAdmin в начало:
 async function loadTasks() {
     const token = getToken();
     if (!token) return;
+    
+    // Принудительно проверяем статус админа
+    const isAdmin = await forceCheckAdmin();
     
     try {
         const res = await fetch('/api/schedule/tasks', {
@@ -20,13 +66,20 @@ async function loadTasks() {
             tasksList = await res.json();
             renderCurrentView();
             updateStats();
+            
             const quickAddBlock = document.getElementById('quickAddBlock');
-            if (quickAddBlock) quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
+            if (quickAddBlock) {
+                quickAddBlock.style.display = isAdmin ? 'block' : 'none';
+            }
         } else {
-            console.error('Failed to load tasks:', res.status);
+            console.error('Failed to load tasks, status:', res.status);
+            tasksList = [];
+            renderCurrentView();
         }
     } catch(e) {
         console.error('Error loading tasks:', e);
+        tasksList = [];
+        renderCurrentView();
     }
 }
 
