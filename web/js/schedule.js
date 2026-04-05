@@ -4,6 +4,11 @@ let tasksList = [];
 let editingTaskId = null;
 let currentView = 'calendar';
 
+// Функция для проверки прав администратора
+function isUserAdmin() {
+    return window.isCurrentUserAdmin === true;
+}
+
 // Загрузить задачи
 async function loadTasks() {
     const token = getToken();
@@ -17,6 +22,12 @@ async function loadTasks() {
             tasksList = await res.json();
             renderCurrentView();
             updateStats();
+            
+            // Показываем кнопки админа
+            const quickAddBlock = document.getElementById('quickAddBlock');
+            if (quickAddBlock) {
+                quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
+            }
         }
     } catch(e) {
         console.error('Error loading tasks:', e);
@@ -64,164 +75,13 @@ function switchView(view) {
     }
 }
 
-// Рендер календарного вида
-function renderCalendarView() {
-    const weekDates = getWeekDates(currentWeekOffset);
-    const container = document.getElementById('scheduleGrid');
-    if (!container) return;
-    
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStr = formatDate(today);
-    
-    const startWeek = weekDates[0];
-    const endWeek = weekDates[6];
-    const weekLabel = `${formatDisplayDate(startWeek)} - ${formatDisplayDate(endWeek)}`;
-    const weekLabelEl = document.getElementById('currentWeekLabel');
-    if (weekLabelEl) weekLabelEl.textContent = weekLabel;
-    
-    container.innerHTML = weekDates.map((date, idx) => {
-        const dateStr = formatDate(date);
-        const isToday = dateStr === todayStr;
-        const dayTasks = tasksList.filter(t => t.due_date === dateStr);
-        
-        dayTasks.sort((a, b) => {
-            if (a.completed !== b.completed) return a.completed ? 1 : -1;
-            const priorityOrder = { high: 0, medium: 1, low: 2 };
-            return (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3);
-        });
-        
-        const todayAnimation = isToday ? 'style="animation: todayGlow 3s ease-in-out infinite; position: relative; overflow: hidden;"' : '';
-        const todayClockAnimation = isToday ? '<div class="today-clock"></div>' : '';
-        
-        return `
-            <div class="schedule-day ${isToday ? 'day-today' : ''}" ${todayAnimation}>
-                ${todayClockAnimation}
-                <div class="day-header">
-                    <div class="day-name">${getDayName(date)}</div>
-                    <div class="day-date">${formatDisplayDate(date)}</div>
-                </div>
-                <div class="day-events">
-                    ${isUserAdmin() ? `
-                        <button class="btn btn-primary add-task-btn" style="width:100%; margin-bottom:12px; padding:8px;" onclick="showTaskModal('${dateStr}')">
-                            + Добавить задачу
-                        </button>
-                    ` : ''}
-                    ${dayTasks.length === 0 ? 
-                        '<div class="empty-events">📭 Нет задач</div>' :
-                        dayTasks.map(task => {
-                            const isOverdue = isTaskOverdue(task);
-                            return `
-                                <div class="task-card ${task.completed ? 'completed-task' : ''} ${isOverdue ? 'overdue-task' : ''}" onclick="event.stopPropagation()">
-                                    <div class="task-card-time">
-                                        <span>🕐</span> ${task.due_time || 'Любое время'}
-                                        ${isOverdue ? '<span style="color:var(--danger); margin-left:8px;">⚠️ Просрочено</span>' : ''}
-                                        ${task.completed ? '<span style="color:var(--success); margin-left:8px;">✅ Выполнено</span>' : ''}
-                                    </div>
-                                    <div class="task-card-title ${task.completed ? 'completed' : ''}">
-                                        ${escapeHtml(task.title)}
-                                    </div>
-                                    ${task.description ? `<div style="font-size:10px; color:var(--text-muted); margin-bottom:6px;">${escapeHtml(task.description)}</div>` : ''}
-                                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                                        <span class="task-card-priority priority-${task.priority}">
-                                            ${getPriorityIcon(task.priority)} ${getPriorityName(task.priority)}
-                                        </span>
-                                        <div style="display:flex; gap:6px;">
-                                            ${!task.completed ? 
-                                                `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">
-                                                    ✅ Выполнить
-                                                </button>` :
-                                                `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">
-                                                    ↩️ Вернуть
-                                                </button>`
-                                            }
-                                            ${isUserAdmin() ? `
-                                                <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
-                                                <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
-                                            ` : ''}
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        }).join('')
-                    }
-                </div>
-            </div>
-        `;
-    }).join('');
-    
-    // Добавляем стили если их нет
-    if (!document.querySelector('#todayAnimationStyle')) {
-        const style = document.createElement('style');
-        style.id = 'todayAnimationStyle';
-        style.textContent = `
-            @keyframes todayGlow {
-                0% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0.4); border-color: var(--accent-primary); }
-                50% { box-shadow: 0 0 0 15px rgba(110, 74, 255, 0); border-color: var(--accent-secondary); }
-                100% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0); border-color: var(--accent-primary); }
-            }
-            .today-clock {
-                position: absolute;
-                top: 10px;
-                right: 10px;
-                width: 30px;
-                height: 30px;
-                border-radius: 50%;
-                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-                animation: clockRotate 2s linear infinite;
-                opacity: 0.6;
-            }
-            @keyframes clockRotate {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            .today-clock::before {
-                content: '';
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                width: 2px;
-                height: 12px;
-                background: white;
-                transform: translate(-50%, -50%);
-                border-radius: 2px;
-            }
-            .today-clock::after {
-                content: '';
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                width: 8px;
-                height: 2px;
-                background: white;
-                transform: translate(-50%, -50%);
-                border-radius: 2px;
-            }
-            .completed-task {
-                opacity: 0.7;
-                background: rgba(0, 214, 143, 0.1);
-                border-left-color: var(--success);
-            }
-            .overdue-task {
-                border-left-color: var(--danger);
-                background: rgba(255, 77, 109, 0.05);
-            }
-            .complete-btn { background: var(--success); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
-            .revert-btn { background: var(--warning); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
-            .edit-btn { background: var(--accent-primary); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
-            .delete-btn { background: var(--danger); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
-            .add-task-btn {
-                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-                color: white;
-                border: none;
-                cursor: pointer;
-            }
-            .add-task-btn:hover, .complete-btn:hover, .revert-btn:hover, .edit-btn:hover, .delete-btn:hover {
-                transform: scale(1.02);
-            }
-        `;
-        document.head.appendChild(style);
+function renderCurrentView() {
+    if (currentView === 'calendar') {
+        renderCalendarView();
+    } else {
+        renderListView();
     }
+    updateStats();
 }
 
 // Функции для работы с датами
@@ -277,7 +137,6 @@ function getPriorityName(priority) {
     return names[priority] || 'Обычный';
 }
 
-// Проверка просрочена ли задача
 function isTaskOverdue(task) {
     if (task.completed) return false;
     if (!task.due_date) return false;
@@ -301,35 +160,26 @@ function renderCalendarView() {
     const weekLabelEl = document.getElementById('currentWeekLabel');
     if (weekLabelEl) weekLabelEl.textContent = weekLabel;
     
-    // Находим сегодняшний индекс для анимации
-    const todayIndex = weekDates.findIndex(d => formatDate(d) === todayStr);
-    
-    container.innerHTML = weekDates.map((date, idx) => {
+    container.innerHTML = weekDates.map((date) => {
         const dateStr = formatDate(date);
         const isToday = dateStr === todayStr;
         const dayTasks = tasksList.filter(t => t.due_date === dateStr);
         
-        // Сортируем задачи
         dayTasks.sort((a, b) => {
             if (a.completed !== b.completed) return a.completed ? 1 : -1;
             const priorityOrder = { high: 0, medium: 1, low: 2 };
             return (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3);
         });
         
-        // Анимация для сегодняшнего дня
-        const todayAnimation = isToday ? 'style="animation: todayGlow 3s ease-in-out infinite; position: relative; overflow: hidden;"' : '';
-        const todayClockAnimation = isToday ? '<div class="today-clock"></div>' : '';
-        
         return `
-            <div class="schedule-day ${isToday ? 'day-today' : ''}" ${todayAnimation}>
-                ${todayClockAnimation}
+            <div class="schedule-day ${isToday ? 'day-today' : ''}">
                 <div class="day-header">
                     <div class="day-name">${getDayName(date)}</div>
                     <div class="day-date">${formatDisplayDate(date)}</div>
                 </div>
                 <div class="day-events">
-                    ${window.isCurrentUserAdmin ? `
-                        <button class="btn btn-primary add-task-btn" style="width:100%; margin-bottom:12px; padding:8px;" onclick="showTaskModal('${dateStr}')">
+                    ${isUserAdmin() ? `
+                        <button class="btn btn-primary add-task-btn" onclick="showTaskModal('${dateStr}')">
                             + Добавить задачу
                         </button>
                     ` : ''}
@@ -338,30 +188,26 @@ function renderCalendarView() {
                         dayTasks.map(task => {
                             const isOverdue = isTaskOverdue(task);
                             return `
-                                <div class="task-card ${task.completed ? 'completed-task' : ''} ${isOverdue ? 'overdue-task' : ''}" onclick="event.stopPropagation()">
+                                <div class="task-card ${task.completed ? 'completed-task' : ''} ${isOverdue ? 'overdue-task' : ''}">
                                     <div class="task-card-time">
-                                        <span>🕐</span> ${task.due_time || 'Любое время'}
-                                        ${isOverdue ? '<span style="color:var(--danger); margin-left:8px;">⚠️ Просрочено</span>' : ''}
-                                        ${task.completed ? '<span style="color:var(--success); margin-left:8px;">✅ Выполнено</span>' : ''}
+                                        🕐 ${task.due_time || 'Любое время'}
+                                        ${isOverdue ? '<span class="overdue-badge">⚠️ Просрочено</span>' : ''}
+                                        ${task.completed ? '<span class="completed-badge">✅ Выполнено</span>' : ''}
                                     </div>
                                     <div class="task-card-title ${task.completed ? 'completed' : ''}">
                                         ${escapeHtml(task.title)}
                                     </div>
-                                    ${task.description ? `<div style="font-size:10px; color:var(--text-muted); margin-bottom:6px;">${escapeHtml(task.description)}</div>` : ''}
-                                    <div style="display:flex; justify-content:space-between; align-items:center;">
-                                        <span class="task-card-priority priority-${task.priority}">
+                                    ${task.description ? `<div class="task-card-desc">${escapeHtml(task.description)}</div>` : ''}
+                                    <div class="task-card-footer">
+                                        <span class="task-card-priority ${task.priority}">
                                             ${getPriorityIcon(task.priority)} ${getPriorityName(task.priority)}
                                         </span>
-                                        <div style="display:flex; gap:6px;">
+                                        <div class="task-card-actions">
                                             ${!task.completed ? 
-                                                `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">
-                                                    ✅ Выполнить
-                                                </button>` :
-                                                `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">
-                                                    ↩️ Вернуть
-                                                </button>`
+                                                `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅</button>` :
+                                                `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️</button>`
                                             }
-                                            ${window.isCurrentUserAdmin ? `
+                                            ${isUserAdmin() ? `
                                                 <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
                                                 <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
                                             ` : ''}
@@ -375,75 +221,6 @@ function renderCalendarView() {
             </div>
         `;
     }).join('');
-    
-    // Добавляем стили для анимации если их нет
-    if (!document.querySelector('#todayAnimationStyle')) {
-        const style = document.createElement('style');
-        style.id = 'todayAnimationStyle';
-        style.textContent = `
-            @keyframes todayGlow {
-                0% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0.4); border-color: var(--accent-primary); }
-                50% { box-shadow: 0 0 0 15px rgba(110, 74, 255, 0); border-color: var(--accent-secondary); }
-                100% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0); border-color: var(--accent-primary); }
-            }
-            .today-clock {
-                position: absolute;
-                top: 10px;
-                right: 10px;
-                width: 30px;
-                height: 30px;
-                border-radius: 50%;
-                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-                animation: clockRotate 2s linear infinite;
-                opacity: 0.6;
-            }
-            @keyframes clockRotate {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            .today-clock::before {
-                content: '';
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                width: 2px;
-                height: 12px;
-                background: white;
-                transform: translate(-50%, -50%);
-                border-radius: 2px;
-            }
-            .today-clock::after {
-                content: '';
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                width: 8px;
-                height: 2px;
-                background: white;
-                transform: translate(-50%, -50%);
-                border-radius: 2px;
-            }
-            .completed-task {
-                opacity: 0.7;
-                background: rgba(0, 214, 143, 0.1);
-                border-left-color: var(--success);
-            }
-            .overdue-task {
-                border-left-color: var(--danger);
-                background: rgba(255, 77, 109, 0.05);
-            }
-            .complete-btn { background: var(--success); color: white; }
-            .revert-btn { background: var(--warning); color: white; }
-            .edit-btn { background: var(--accent-primary); color: white; }
-            .delete-btn { background: var(--danger); color: white; }
-            .add-task-btn {
-                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-                color: white;
-                border: none;
-            }
-        `;
-        document.head.appendChild(style);
-    }
 }
 
 // Рендер спискового вида
@@ -457,7 +234,6 @@ function renderListView() {
         completed: tasksList.filter(t => t.completed)
     };
     
-    // Сортируем задачи
     groups.overdue.sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''));
     groups.pending.sort((a, b) => {
         const priorityOrder = { high: 0, medium: 1, low: 2 };
@@ -470,7 +246,7 @@ function renderListView() {
     container.innerHTML = `
         ${groups.overdue.length > 0 ? `
             <div class="task-group">
-                <div class="task-group-title" style="background: rgba(255,77,109,0.2); color: var(--danger);">⚠️ Просроченные (${groups.overdue.length})</div>
+                <div class="task-group-title overdue-title">⚠️ Просроченные (${groups.overdue.length})</div>
                 ${groups.overdue.map(task => renderTaskItem(task, true)).join('')}
             </div>
         ` : ''}
@@ -490,11 +266,11 @@ function renderListView() {
 
 function renderTaskItem(task, isOverdue = false) {
     return `
-        <div class="task-item ${task.completed ? 'completed' : ''} ${isOverdue ? 'overdue' : ''}" data-task-id="${task.id}">
+        <div class="task-item ${task.completed ? 'completed' : ''} ${isOverdue ? 'overdue' : ''}">
             <div class="task-checkbox ${task.completed ? 'completed' : ''}" onclick="toggleTaskComplete('${task.id}')"></div>
             <div class="task-content">
                 <div class="task-title ${task.completed ? 'completed' : ''}">${escapeHtml(task.title)}</div>
-                ${task.description ? `<div style="font-size:11px; color:var(--text-muted); margin-top:4px;">${escapeHtml(task.description)}</div>` : ''}
+                ${task.description ? `<div class="task-desc">${escapeHtml(task.description)}</div>` : ''}
                 <div class="task-meta">
                     ${task.due_date ? `<span class="task-date">📅 ${formatDisplayDateStr(task.due_date)}${isOverdue ? ' (просрочено)' : ''}</span>` : ''}
                     ${task.due_time ? `<span class="task-time">⏰ ${task.due_time}</span>` : ''}
@@ -515,25 +291,77 @@ function renderTaskItem(task, isOverdue = false) {
     `;
 }
 
+// Визуальный TimePicker с ползунком
+function initTimePicker() {
+    const timeInput = document.getElementById('taskDueTime');
+    if (!timeInput) return;
+    
+    // Создаем контейнер для визуального выбора времени
+    const timePickerContainer = document.createElement('div');
+    timePickerContainer.className = 'time-picker-container';
+    timePickerContainer.innerHTML = `
+        <div class="time-slider">
+            <input type="range" id="timeSlider" min="0" max="24" step="0.5" value="12">
+            <div class="time-slider-labels">
+                <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+            </div>
+        </div>
+        <div class="time-presets">
+            <button type="button" class="time-preset" data-time="09:00">🌅 Утро 9:00</button>
+            <button type="button" class="time-preset" data-time="12:00">☀️ Обед 12:00</button>
+            <button type="button" class="time-preset" data-time="15:00">📊 День 15:00</button>
+            <button type="button" class="time-preset" data-time="18:00">🌆 Вечер 18:00</button>
+            <button type="button" class="time-preset" data-time="">🕐 Любое время</button>
+        </div>
+    `;
+    
+    // Вставляем после поля ввода времени
+    timeInput.parentNode.insertBefore(timePickerContainer, timeInput.nextSibling);
+    
+    const timeSlider = document.getElementById('timeSlider');
+    
+    function updateTimeFromSlider() {
+        const val = parseFloat(timeSlider.value);
+        const hours = Math.floor(val);
+        const minutes = (val % 1) * 60;
+        const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+        timeInput.value = timeStr;
+    }
+    
+    timeSlider.addEventListener('input', updateTimeFromSlider);
+    
+    document.querySelectorAll('.time-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const presetTime = btn.dataset.time;
+            timeInput.value = presetTime;
+            if (presetTime) {
+                const [hours, minutes] = presetTime.split(':');
+                const sliderVal = parseInt(hours) + (parseInt(minutes) / 60);
+                timeSlider.value = sliderVal;
+            }
+        });
+    });
+    
+    updateTimeFromSlider();
+}
+
 // CRUD операции
 function showTaskModal(prefilledDate = '') {
     editingTaskId = null;
-    const modalTitle = document.getElementById('taskModalTitle');
-    const titleInput = document.getElementById('taskTitle');
-    const descInput = document.getElementById('taskDescription');
-    const dateInput = document.getElementById('taskDueDate');
-    const timeInput = document.getElementById('taskDueTime');
-    const prioritySelect = document.getElementById('taskPriority');
+    document.getElementById('taskModalTitle').textContent = '➕ Новая задача';
+    document.getElementById('taskTitle').value = '';
+    document.getElementById('taskDescription').value = '';
+    document.getElementById('taskDueDate').value = prefilledDate || formatDate(new Date());
+    document.getElementById('taskDueTime').value = '';
+    document.getElementById('taskPriority').value = 'medium';
+    document.getElementById('taskModal').style.display = 'flex';
     
-    if (modalTitle) modalTitle.textContent = '➕ Новая задача';
-    if (titleInput) titleInput.value = '';
-    if (descInput) descInput.value = '';
-    if (dateInput) dateInput.value = prefilledDate || formatDate(new Date());
-    if (timeInput) timeInput.value = '';
-    if (prioritySelect) prioritySelect.value = 'medium';
-    
-    const modal = document.getElementById('taskModal');
-    if (modal) modal.style.display = 'flex';
+    // Инициализируем TimePicker если еще нет
+    setTimeout(() => {
+        if (!document.querySelector('.time-picker-container')) {
+            initTimePicker();
+        }
+    }, 100);
 }
 
 async function editTask(taskId) {
@@ -541,37 +369,22 @@ async function editTask(taskId) {
     if (!task) return;
     
     editingTaskId = taskId;
-    const modalTitle = document.getElementById('taskModalTitle');
-    const titleInput = document.getElementById('taskTitle');
-    const descInput = document.getElementById('taskDescription');
-    const dateInput = document.getElementById('taskDueDate');
-    const timeInput = document.getElementById('taskDueTime');
-    const prioritySelect = document.getElementById('taskPriority');
-    
-    if (modalTitle) modalTitle.textContent = '✏️ Редактировать задачу';
-    if (titleInput) titleInput.value = task.title;
-    if (descInput) descInput.value = task.description || '';
-    if (dateInput) dateInput.value = task.due_date || '';
-    if (timeInput) timeInput.value = task.due_time || '';
-    if (prioritySelect) prioritySelect.value = task.priority || 'medium';
-    
-    const modal = document.getElementById('taskModal');
-    if (modal) modal.style.display = 'flex';
+    document.getElementById('taskModalTitle').textContent = '✏️ Редактировать задачу';
+    document.getElementById('taskTitle').value = task.title;
+    document.getElementById('taskDescription').value = task.description || '';
+    document.getElementById('taskDueDate').value = task.due_date || '';
+    document.getElementById('taskDueTime').value = task.due_time || '';
+    document.getElementById('taskPriority').value = task.priority || 'medium';
+    document.getElementById('taskModal').style.display = 'flex';
 }
 
 async function saveTask() {
     const token = getToken();
-    const titleInput = document.getElementById('taskTitle');
-    const descInput = document.getElementById('taskDescription');
-    const dateInput = document.getElementById('taskDueDate');
-    const timeInput = document.getElementById('taskDueTime');
-    const prioritySelect = document.getElementById('taskPriority');
-    
-    const title = titleInput ? titleInput.value.trim() : '';
-    const description = descInput ? descInput.value.trim() : '';
-    const dueDate = dateInput ? dateInput.value : '';
-    const dueTime = timeInput ? timeInput.value : '';
-    const priority = prioritySelect ? prioritySelect.value : 'medium';
+    const title = document.getElementById('taskTitle').value.trim();
+    const description = document.getElementById('taskDescription').value.trim();
+    const dueDate = document.getElementById('taskDueDate').value;
+    const dueTime = document.getElementById('taskDueTime').value;
+    const priority = document.getElementById('taskPriority').value;
     
     if (!title) {
         alert('Введите название задачи');
@@ -599,9 +412,7 @@ async function saveTask() {
         if (res.ok) {
             closeTaskModal();
             loadTasks();
-            if (typeof showToast === 'function') {
-                showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена');
-            }
+            showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена');
         } else {
             const error = await res.json();
             alert('Ошибка: ' + (error.error || 'Неизвестная ошибка'));
@@ -626,9 +437,7 @@ async function toggleTaskComplete(taskId) {
         
         if (res.ok) {
             loadTasks();
-            if (typeof showToast === 'function') {
-                showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉');
-            }
+            showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉');
         }
     } catch(e) {
         console.error('Error toggling task:', e);
@@ -647,9 +456,7 @@ async function deleteTask(taskId) {
         
         if (res.ok) {
             loadTasks();
-            if (typeof showToast === 'function') {
-                showToast('Задача удалена');
-            }
+            showToast('Задача удалена');
         }
     } catch(e) {
         console.error('Error deleting task:', e);
@@ -657,12 +464,10 @@ async function deleteTask(taskId) {
 }
 
 function closeTaskModal() {
-    const modal = document.getElementById('taskModal');
-    if (modal) modal.style.display = 'none';
+    document.getElementById('taskModal').style.display = 'none';
     editingTaskId = null;
 }
 
-// Навигация по неделям
 function changeWeek(delta) {
     currentWeekOffset += delta;
     renderCalendarView();
@@ -671,7 +476,6 @@ function changeWeek(delta) {
 function goToToday() {
     currentWeekOffset = 0;
     renderCalendarView();
-    // Прокручиваем к сегодняшнему дню
     setTimeout(() => {
         const todayCard = document.querySelector('.schedule-day.day-today');
         if (todayCard) {
@@ -680,7 +484,6 @@ function goToToday() {
     }, 100);
 }
 
-// Быстрое добавление
 function quickAddTask() {
     const titleInput = document.getElementById('quickTaskTitle');
     const title = titleInput ? titleInput.value.trim() : '';
@@ -710,9 +513,7 @@ async function saveTaskQuick(title, priority, dueDate) {
         
         if (res.ok) {
             loadTasks();
-            if (typeof showToast === 'function') {
-                showToast('Задача добавлена');
-            }
+            showToast('Задача добавлена');
         }
     } catch(e) {
         console.error('Error:', e);
@@ -736,7 +537,7 @@ function switchContentTab(tab) {
     if (tab === 'schedule') {
         const quickAddBlock = document.getElementById('quickAddBlock');
         if (quickAddBlock) {
-            quickAddBlock.style.display = window.isCurrentUserAdmin ? 'block' : 'none';
+            quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
         }
         loadTasks();
     }
@@ -745,11 +546,5 @@ function switchContentTab(tab) {
 // Инициализация
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Schedule.js loaded');
-    
-    setTimeout(function() {
-        if (window.isCurrentUserAdmin) {
-            const quickAddBlock = document.getElementById('quickAddBlock');
-            if (quickAddBlock) quickAddBlock.style.display = 'block';
-        }
-    }, 500);
+    console.log('isUserAdmin:', isUserAdmin());
 });
