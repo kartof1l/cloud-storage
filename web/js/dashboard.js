@@ -16,6 +16,8 @@ let longPressTimer = null;
 let currentLongPressCard = null;
 let touchMoveTarget = null;
 let isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+// Глобальная переменная для доступа из других скриптов
+window.isCurrentUserAdmin = false;
 
 // ==================== ПОЛЬЗОВАТЕЛЬ ====================
 async function loadUserInfo() {
@@ -47,17 +49,39 @@ async function checkIfUserIsAdmin() {
         if (res.ok) {
             const admins = await res.json();
             isCurrentUserAdmin = admins.some(admin => admin.email === currentUser?.email);
-            window.isCurrentUserAdmin = isCurrentUserAdmin; // Добавьте эту строку
+            
+            // КРИТИЧЕСКИ ВАЖНО - устанавливаем глобальную переменную
+            window.isCurrentUserAdmin = isCurrentUserAdmin;
+            
+            console.log('=== ADMIN CHECK ===');
+            console.log('Current user email:', currentUser?.email);
+            console.log('Admins list:', admins.map(a => a.email));
+            console.log('isCurrentUserAdmin:', isCurrentUserAdmin);
+            console.log('window.isCurrentUserAdmin:', window.isCurrentUserAdmin);
+            
             const adminNav = document.getElementById('navAdmin');
             if (adminNav) {
                 adminNav.style.display = isCurrentUserAdmin ? 'flex' : 'none';
             }
+            
+            // Обновляем блок быстрого добавления если он уже существует
+            const quickAddBlock = document.getElementById('quickAddBlock');
+            if (quickAddBlock) {
+                quickAddBlock.style.display = isCurrentUserAdmin ? 'block' : 'none';
+            }
+            
+            return isCurrentUserAdmin;
+        } else {
+            console.error('Failed to fetch admins, status:', res.status);
         }
     } catch(e) { 
         console.error('Error checking admin status:', e);
-        const adminNav = document.getElementById('navAdmin');
-        if (adminNav) adminNav.style.display = 'none';
     }
+    
+    window.isCurrentUserAdmin = false;
+    const adminNav = document.getElementById('navAdmin');
+    if (adminNav) adminNav.style.display = 'none';
+    return false;
 }
 function showProfileModal() { 
     document.getElementById('editFirstName').value = currentUser?.first_name || ''; 
