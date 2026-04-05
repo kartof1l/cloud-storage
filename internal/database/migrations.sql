@@ -127,9 +127,7 @@ CREATE TRIGGER trigger_update_folder_size
     FOR EACH ROW
     EXECUTE FUNCTION update_parent_folder_size();
 
--- Таблица для мероприятий расписания
--- Таблица для задач (вместо schedule_events)
-DROP TABLE IF EXISTS schedule_events;
+-- Создание таблицы для задач
 CREATE TABLE IF NOT EXISTS schedule_tasks (
     id VARCHAR(36) PRIMARY KEY,
     title VARCHAR(255) NOT NULL,
@@ -143,6 +141,7 @@ CREATE TABLE IF NOT EXISTS schedule_tasks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Индексы для быстрого поиска
 CREATE INDEX IF NOT EXISTS idx_schedule_tasks_date ON schedule_tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_schedule_tasks_created_by ON schedule_tasks(created_by);
 CREATE INDEX IF NOT EXISTS idx_schedule_tasks_completed ON schedule_tasks(completed);

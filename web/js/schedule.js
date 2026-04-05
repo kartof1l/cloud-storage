@@ -4,12 +4,10 @@ let tasksList = [];
 let editingTaskId = null;
 let currentView = 'calendar';
 
-// Функция для проверки прав администратора
 function isUserAdmin() {
     return window.isCurrentUserAdmin === true;
 }
 
-// Загрузить задачи
 async function loadTasks() {
     const token = getToken();
     if (!token) return;
@@ -22,19 +20,16 @@ async function loadTasks() {
             tasksList = await res.json();
             renderCurrentView();
             updateStats();
-            
-            // Показываем кнопки админа
             const quickAddBlock = document.getElementById('quickAddBlock');
-            if (quickAddBlock) {
-                quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
-            }
+            if (quickAddBlock) quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
+        } else {
+            console.error('Failed to load tasks:', res.status);
         }
     } catch(e) {
         console.error('Error loading tasks:', e);
     }
 }
 
-// Обновить статистику
 function updateStats() {
     const total = tasksList.length;
     const completed = tasksList.filter(t => t.completed).length;
@@ -54,46 +49,32 @@ function updateStats() {
     }
 }
 
-// Переключение вида
 function switchView(view) {
     currentView = view;
-    
     document.querySelectorAll('.view-btn').forEach(btn => btn.classList.remove('active'));
     const activeBtn = document.querySelector(`.view-btn[data-view="${view}"]`);
     if (activeBtn) activeBtn.classList.add('active');
-    
     const calendarView = document.getElementById('calendarView');
     const listView = document.getElementById('listView');
-    
     if (calendarView) calendarView.classList.toggle('active', view === 'calendar');
     if (listView) listView.classList.toggle('active', view === 'list');
-    
-    if (view === 'list') {
-        renderListView();
-    } else {
-        renderCalendarView();
-    }
+    if (view === 'list') renderListView();
+    else renderCalendarView();
 }
 
 function renderCurrentView() {
-    if (currentView === 'calendar') {
-        renderCalendarView();
-    } else {
-        renderListView();
-    }
+    if (currentView === 'calendar') renderCalendarView();
+    else renderListView();
     updateStats();
 }
 
-// Функции для работы с датами
 function getWeekDates(offset = 0) {
     const today = new Date();
     const currentDay = today.getDay();
     const diffToMonday = currentDay === 0 ? -6 : 1 - currentDay;
-    
     const monday = new Date(today);
     monday.setDate(today.getDate() + diffToMonday + (offset * 7));
     monday.setHours(0, 0, 0, 0);
-    
     const weekDates = [];
     for (let i = 0; i < 7; i++) {
         const date = new Date(monday);
@@ -144,7 +125,6 @@ function isTaskOverdue(task) {
     return task.due_date < today;
 }
 
-// Рендер календарного вида
 function renderCalendarView() {
     const weekDates = getWeekDates(currentWeekOffset);
     const container = document.getElementById('scheduleGrid');
@@ -153,7 +133,6 @@ function renderCalendarView() {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayStr = formatDate(today);
-    
     const startWeek = weekDates[0];
     const endWeek = weekDates[6];
     const weekLabel = `${formatDisplayDate(startWeek)} - ${formatDisplayDate(endWeek)}`;
@@ -164,7 +143,6 @@ function renderCalendarView() {
         const dateStr = formatDate(date);
         const isToday = dateStr === todayStr;
         const dayTasks = tasksList.filter(t => t.due_date === dateStr);
-        
         dayTasks.sort((a, b) => {
             if (a.completed !== b.completed) return a.completed ? 1 : -1;
             const priorityOrder = { high: 0, medium: 1, low: 2 };
@@ -178,39 +156,20 @@ function renderCalendarView() {
                     <div class="day-date">${formatDisplayDate(date)}</div>
                 </div>
                 <div class="day-events">
-                    ${isUserAdmin() ? `
-                        <button class="btn btn-primary add-task-btn" onclick="showTaskModal('${dateStr}')">
-                            + Добавить задачу
-                        </button>
-                    ` : ''}
-                    ${dayTasks.length === 0 ? 
-                        '<div class="empty-events">📭 Нет задач</div>' :
+                    ${isUserAdmin() ? `<button class="btn btn-primary add-task-btn" onclick="showTaskModal('${dateStr}')">+ Добавить задачу</button>` : ''}
+                    ${dayTasks.length === 0 ? '<div class="empty-events">📭 Нет задач</div>' :
                         dayTasks.map(task => {
                             const isOverdue = isTaskOverdue(task);
                             return `
                                 <div class="task-card ${task.completed ? 'completed-task' : ''} ${isOverdue ? 'overdue-task' : ''}">
-                                    <div class="task-card-time">
-                                        🕐 ${task.due_time || 'Любое время'}
-                                        ${isOverdue ? '<span class="overdue-badge">⚠️ Просрочено</span>' : ''}
-                                        ${task.completed ? '<span class="completed-badge">✅ Выполнено</span>' : ''}
-                                    </div>
-                                    <div class="task-card-title ${task.completed ? 'completed' : ''}">
-                                        ${escapeHtml(task.title)}
-                                    </div>
+                                    <div class="task-card-time">🕐 ${task.due_time || 'Любое время'}${isOverdue ? ' <span class="overdue-badge">⚠️ Просрочено</span>' : ''}${task.completed ? ' <span class="completed-badge">✅ Выполнено</span>' : ''}</div>
+                                    <div class="task-card-title ${task.completed ? 'completed' : ''}">${escapeHtml(task.title)}</div>
                                     ${task.description ? `<div class="task-card-desc">${escapeHtml(task.description)}</div>` : ''}
                                     <div class="task-card-footer">
-                                        <span class="task-card-priority ${task.priority}">
-                                            ${getPriorityIcon(task.priority)} ${getPriorityName(task.priority)}
-                                        </span>
+                                        <span class="task-card-priority ${task.priority}">${getPriorityIcon(task.priority)} ${getPriorityName(task.priority)}</span>
                                         <div class="task-card-actions">
-                                            ${!task.completed ? 
-                                                `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅</button>` :
-                                                `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️</button>`
-                                            }
-                                            ${isUserAdmin() ? `
-                                                <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
-                                                <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
-                                            ` : ''}
+                                            ${!task.completed ? `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅</button>` : `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️</button>`}
+                                            ${isUserAdmin() ? `<button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button><button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>` : ''}
                                         </div>
                                     </div>
                                 </div>
@@ -223,7 +182,6 @@ function renderCalendarView() {
     }).join('');
 }
 
-// Рендер спискового вида
 function renderListView() {
     const container = document.getElementById('tasksListContainer');
     if (!container) return;
@@ -244,23 +202,9 @@ function renderListView() {
     groups.completed.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
     
     container.innerHTML = `
-        ${groups.overdue.length > 0 ? `
-            <div class="task-group">
-                <div class="task-group-title overdue-title">⚠️ Просроченные (${groups.overdue.length})</div>
-                ${groups.overdue.map(task => renderTaskItem(task, true)).join('')}
-            </div>
-        ` : ''}
-        <div class="task-group">
-            <div class="task-group-title">⏳ Активные задачи (${groups.pending.length})</div>
-            ${groups.pending.length === 0 && groups.overdue.length === 0 ? '<div class="empty-events">✨ Все задачи выполнены!</div>' : ''}
-            ${groups.pending.map(task => renderTaskItem(task, false)).join('')}
-        </div>
-        ${groups.completed.length > 0 ? `
-            <div class="task-group">
-                <div class="task-group-title">✅ Выполненные (${groups.completed.length})</div>
-                ${groups.completed.map(task => renderTaskItem(task, false)).join('')}
-            </div>
-        ` : ''}
+        ${groups.overdue.length > 0 ? `<div class="task-group"><div class="task-group-title overdue-title">⚠️ Просроченные (${groups.overdue.length})</div>${groups.overdue.map(task => renderTaskItem(task, true)).join('')}</div>` : ''}
+        <div class="task-group"><div class="task-group-title">⏳ Активные задачи (${groups.pending.length})</div>${groups.pending.length === 0 && groups.overdue.length === 0 ? '<div class="empty-events">✨ Все задачи выполнены!</div>' : ''}${groups.pending.map(task => renderTaskItem(task, false)).join('')}</div>
+        ${groups.completed.length > 0 ? `<div class="task-group"><div class="task-group-title">✅ Выполненные (${groups.completed.length})</div>${groups.completed.map(task => renderTaskItem(task, false)).join('')}</div>` : ''}
     `;
 }
 
@@ -278,74 +222,13 @@ function renderTaskItem(task, isOverdue = false) {
                 </div>
             </div>
             <div class="task-actions">
-                ${!task.completed ? 
-                    `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅ Выполнить</button>` :
-                    `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️ Вернуть</button>`
-                }
-                ${isUserAdmin() ? `
-                    <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
-                    <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
-                ` : ''}
+                ${!task.completed ? `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅ Выполнить</button>` : `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️ Вернуть</button>`}
+                ${isUserAdmin() ? `<button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button><button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>` : ''}
             </div>
         </div>
     `;
 }
 
-// Визуальный TimePicker с ползунком
-function initTimePicker() {
-    const timeInput = document.getElementById('taskDueTime');
-    if (!timeInput) return;
-    
-    // Создаем контейнер для визуального выбора времени
-    const timePickerContainer = document.createElement('div');
-    timePickerContainer.className = 'time-picker-container';
-    timePickerContainer.innerHTML = `
-        <div class="time-slider">
-            <input type="range" id="timeSlider" min="0" max="24" step="0.5" value="12">
-            <div class="time-slider-labels">
-                <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
-            </div>
-        </div>
-        <div class="time-presets">
-            <button type="button" class="time-preset" data-time="09:00">🌅 Утро 9:00</button>
-            <button type="button" class="time-preset" data-time="12:00">☀️ Обед 12:00</button>
-            <button type="button" class="time-preset" data-time="15:00">📊 День 15:00</button>
-            <button type="button" class="time-preset" data-time="18:00">🌆 Вечер 18:00</button>
-            <button type="button" class="time-preset" data-time="">🕐 Любое время</button>
-        </div>
-    `;
-    
-    // Вставляем после поля ввода времени
-    timeInput.parentNode.insertBefore(timePickerContainer, timeInput.nextSibling);
-    
-    const timeSlider = document.getElementById('timeSlider');
-    
-    function updateTimeFromSlider() {
-        const val = parseFloat(timeSlider.value);
-        const hours = Math.floor(val);
-        const minutes = (val % 1) * 60;
-        const timeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-        timeInput.value = timeStr;
-    }
-    
-    timeSlider.addEventListener('input', updateTimeFromSlider);
-    
-    document.querySelectorAll('.time-preset').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const presetTime = btn.dataset.time;
-            timeInput.value = presetTime;
-            if (presetTime) {
-                const [hours, minutes] = presetTime.split(':');
-                const sliderVal = parseInt(hours) + (parseInt(minutes) / 60);
-                timeSlider.value = sliderVal;
-            }
-        });
-    });
-    
-    updateTimeFromSlider();
-}
-
-// CRUD операции
 function showTaskModal(prefilledDate = '') {
     editingTaskId = null;
     document.getElementById('taskModalTitle').textContent = '➕ Новая задача';
@@ -355,19 +238,11 @@ function showTaskModal(prefilledDate = '') {
     document.getElementById('taskDueTime').value = '';
     document.getElementById('taskPriority').value = 'medium';
     document.getElementById('taskModal').style.display = 'flex';
-    
-    // Инициализируем TimePicker если еще нет
-    setTimeout(() => {
-        if (!document.querySelector('.time-picker-container')) {
-            initTimePicker();
-        }
-    }, 100);
 }
 
 async function editTask(taskId) {
     const task = tasksList.find(t => t.id === taskId);
     if (!task) return;
-    
     editingTaskId = taskId;
     document.getElementById('taskModalTitle').textContent = '✏️ Редактировать задачу';
     document.getElementById('taskTitle').value = task.title;
@@ -385,165 +260,79 @@ async function saveTask() {
     const dueDate = document.getElementById('taskDueDate').value;
     const dueTime = document.getElementById('taskDueTime').value;
     const priority = document.getElementById('taskPriority').value;
-    
-    if (!title) {
-        alert('Введите название задачи');
-        return;
-    }
-    
+    if (!title) { alert('Введите название задачи'); return; }
     const data = { title, description, due_date: dueDate, due_time: dueTime, priority };
-    
     try {
         let res;
         if (editingTaskId) {
-            res = await fetch(`/api/schedule/tasks/${editingTaskId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify(data)
-            });
+            res = await fetch(`/api/schedule/tasks/${editingTaskId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(data) });
         } else {
-            res = await fetch('/api/schedule/tasks', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify(data)
-            });
+            res = await fetch('/api/schedule/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(data) });
         }
-        
-        if (res.ok) {
-            closeTaskModal();
-            loadTasks();
-            showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена');
-        } else {
-            const error = await res.json();
-            alert('Ошибка: ' + (error.error || 'Неизвестная ошибка'));
-        }
-    } catch(e) {
-        console.error('Error saving task:', e);
-        alert('Ошибка сохранения');
-    }
+        if (res.ok) { closeTaskModal(); loadTasks(); showToast(editingTaskId ? 'Задача обновлена' : 'Задача добавлена'); }
+        else { const error = await res.json(); alert('Ошибка: ' + (error.error || 'Неизвестная ошибка')); }
+    } catch(e) { console.error(e); alert('Ошибка сохранения'); }
 }
 
 async function toggleTaskComplete(taskId) {
     const token = getToken();
     const task = tasksList.find(t => t.id === taskId);
     if (!task) return;
-    
     try {
-        const res = await fetch(`/api/schedule/tasks/${taskId}/toggle`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-            body: JSON.stringify({ completed: !task.completed })
-        });
-        
-        if (res.ok) {
-            loadTasks();
-            showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉');
-        }
-    } catch(e) {
-        console.error('Error toggling task:', e);
-    }
+        const res = await fetch(`/api/schedule/tasks/${taskId}/toggle`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ completed: !task.completed }) });
+        if (res.ok) { loadTasks(); showToast(task.completed ? 'Задача возвращена' : 'Задача выполнена! 🎉'); }
+    } catch(e) { console.error(e); }
 }
 
 async function deleteTask(taskId) {
     if (!confirm('Удалить задачу?')) return;
-    
     const token = getToken();
     try {
-        const res = await fetch(`/api/schedule/tasks/${taskId}`, {
-            method: 'DELETE',
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        
-        if (res.ok) {
-            loadTasks();
-            showToast('Задача удалена');
-        }
-    } catch(e) {
-        console.error('Error deleting task:', e);
-    }
+        const res = await fetch(`/api/schedule/tasks/${taskId}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${token}` } });
+        if (res.ok) { loadTasks(); showToast('Задача удалена'); }
+    } catch(e) { console.error(e); }
 }
 
-function closeTaskModal() {
-    document.getElementById('taskModal').style.display = 'none';
-    editingTaskId = null;
-}
+function closeTaskModal() { document.getElementById('taskModal').style.display = 'none'; editingTaskId = null; }
 
-function changeWeek(delta) {
-    currentWeekOffset += delta;
-    renderCalendarView();
-}
+function changeWeek(delta) { currentWeekOffset += delta; renderCalendarView(); }
 
-function goToToday() {
-    currentWeekOffset = 0;
-    renderCalendarView();
-    setTimeout(() => {
-        const todayCard = document.querySelector('.schedule-day.day-today');
-        if (todayCard) {
-            todayCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-    }, 100);
-}
+function goToToday() { currentWeekOffset = 0; renderCalendarView(); setTimeout(() => { const todayCard = document.querySelector('.schedule-day.day-today'); if (todayCard) todayCard.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 100); }
 
 function quickAddTask() {
-    const titleInput = document.getElementById('quickTaskTitle');
-    const title = titleInput ? titleInput.value.trim() : '';
-    if (!title) {
-        alert('Введите название задачи');
-        return;
-    }
-    
-    const prioritySelect = document.getElementById('quickTaskPriority');
-    const priority = prioritySelect ? prioritySelect.value : 'medium';
+    const title = document.getElementById('quickTaskTitle').value.trim();
+    if (!title) { alert('Введите название задачи'); return; }
+    const priority = document.getElementById('quickTaskPriority').value;
     const dueDate = formatDate(new Date());
-    
     saveTaskQuick(title, priority, dueDate);
-    if (titleInput) titleInput.value = '';
+    document.getElementById('quickTaskTitle').value = '';
 }
 
 async function saveTaskQuick(title, priority, dueDate) {
     const token = getToken();
     const data = { title, priority, due_date: dueDate, description: '', due_time: '' };
-    
     try {
-        const res = await fetch('/api/schedule/tasks', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-            body: JSON.stringify(data)
-        });
-        
-        if (res.ok) {
-            loadTasks();
-            showToast('Задача добавлена');
-        }
-    } catch(e) {
-        console.error('Error:', e);
-    }
+        const res = await fetch('/api/schedule/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify(data) });
+        if (res.ok) { loadTasks(); showToast('Задача добавлена'); }
+    } catch(e) { console.error(e); }
 }
 
-// Переключение вкладок
 function switchContentTab(tab) {
     console.log('Switching to tab:', tab);
-    
     document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
     const activeBtn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
     if (activeBtn) activeBtn.classList.add('active');
-    
     const filesContent = document.getElementById('filesContent');
     const scheduleContent = document.getElementById('scheduleContent');
-    
     if (filesContent) filesContent.style.display = tab === 'files' ? 'block' : 'none';
     if (scheduleContent) scheduleContent.style.display = tab === 'schedule' ? 'block' : 'none';
-    
     if (tab === 'schedule') {
         const quickAddBlock = document.getElementById('quickAddBlock');
-        if (quickAddBlock) {
-            quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
-        }
+        if (quickAddBlock) quickAddBlock.style.display = isUserAdmin() ? 'block' : 'none';
         loadTasks();
     }
 }
 
-// Инициализация
 document.addEventListener('DOMContentLoaded', function() {
     console.log('Schedule.js loaded');
     console.log('isUserAdmin:', isUserAdmin());
