@@ -64,13 +64,164 @@ function switchView(view) {
     }
 }
 
-function renderCurrentView() {
-    if (currentView === 'calendar') {
-        renderCalendarView();
-    } else {
-        renderListView();
+// Рендер календарного вида
+function renderCalendarView() {
+    const weekDates = getWeekDates(currentWeekOffset);
+    const container = document.getElementById('scheduleGrid');
+    if (!container) return;
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayStr = formatDate(today);
+    
+    const startWeek = weekDates[0];
+    const endWeek = weekDates[6];
+    const weekLabel = `${formatDisplayDate(startWeek)} - ${formatDisplayDate(endWeek)}`;
+    const weekLabelEl = document.getElementById('currentWeekLabel');
+    if (weekLabelEl) weekLabelEl.textContent = weekLabel;
+    
+    container.innerHTML = weekDates.map((date, idx) => {
+        const dateStr = formatDate(date);
+        const isToday = dateStr === todayStr;
+        const dayTasks = tasksList.filter(t => t.due_date === dateStr);
+        
+        dayTasks.sort((a, b) => {
+            if (a.completed !== b.completed) return a.completed ? 1 : -1;
+            const priorityOrder = { high: 0, medium: 1, low: 2 };
+            return (priorityOrder[a.priority] || 3) - (priorityOrder[b.priority] || 3);
+        });
+        
+        const todayAnimation = isToday ? 'style="animation: todayGlow 3s ease-in-out infinite; position: relative; overflow: hidden;"' : '';
+        const todayClockAnimation = isToday ? '<div class="today-clock"></div>' : '';
+        
+        return `
+            <div class="schedule-day ${isToday ? 'day-today' : ''}" ${todayAnimation}>
+                ${todayClockAnimation}
+                <div class="day-header">
+                    <div class="day-name">${getDayName(date)}</div>
+                    <div class="day-date">${formatDisplayDate(date)}</div>
+                </div>
+                <div class="day-events">
+                    ${isUserAdmin() ? `
+                        <button class="btn btn-primary add-task-btn" style="width:100%; margin-bottom:12px; padding:8px;" onclick="showTaskModal('${dateStr}')">
+                            + Добавить задачу
+                        </button>
+                    ` : ''}
+                    ${dayTasks.length === 0 ? 
+                        '<div class="empty-events">📭 Нет задач</div>' :
+                        dayTasks.map(task => {
+                            const isOverdue = isTaskOverdue(task);
+                            return `
+                                <div class="task-card ${task.completed ? 'completed-task' : ''} ${isOverdue ? 'overdue-task' : ''}" onclick="event.stopPropagation()">
+                                    <div class="task-card-time">
+                                        <span>🕐</span> ${task.due_time || 'Любое время'}
+                                        ${isOverdue ? '<span style="color:var(--danger); margin-left:8px;">⚠️ Просрочено</span>' : ''}
+                                        ${task.completed ? '<span style="color:var(--success); margin-left:8px;">✅ Выполнено</span>' : ''}
+                                    </div>
+                                    <div class="task-card-title ${task.completed ? 'completed' : ''}">
+                                        ${escapeHtml(task.title)}
+                                    </div>
+                                    ${task.description ? `<div style="font-size:10px; color:var(--text-muted); margin-bottom:6px;">${escapeHtml(task.description)}</div>` : ''}
+                                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                                        <span class="task-card-priority priority-${task.priority}">
+                                            ${getPriorityIcon(task.priority)} ${getPriorityName(task.priority)}
+                                        </span>
+                                        <div style="display:flex; gap:6px;">
+                                            ${!task.completed ? 
+                                                `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">
+                                                    ✅ Выполнить
+                                                </button>` :
+                                                `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">
+                                                    ↩️ Вернуть
+                                                </button>`
+                                            }
+                                            ${isUserAdmin() ? `
+                                                <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
+                                                <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
+                                            ` : ''}
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')
+                    }
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    // Добавляем стили если их нет
+    if (!document.querySelector('#todayAnimationStyle')) {
+        const style = document.createElement('style');
+        style.id = 'todayAnimationStyle';
+        style.textContent = `
+            @keyframes todayGlow {
+                0% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0.4); border-color: var(--accent-primary); }
+                50% { box-shadow: 0 0 0 15px rgba(110, 74, 255, 0); border-color: var(--accent-secondary); }
+                100% { box-shadow: 0 0 0 0 rgba(110, 74, 255, 0); border-color: var(--accent-primary); }
+            }
+            .today-clock {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                width: 30px;
+                height: 30px;
+                border-radius: 50%;
+                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+                animation: clockRotate 2s linear infinite;
+                opacity: 0.6;
+            }
+            @keyframes clockRotate {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            .today-clock::before {
+                content: '';
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                width: 2px;
+                height: 12px;
+                background: white;
+                transform: translate(-50%, -50%);
+                border-radius: 2px;
+            }
+            .today-clock::after {
+                content: '';
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                width: 8px;
+                height: 2px;
+                background: white;
+                transform: translate(-50%, -50%);
+                border-radius: 2px;
+            }
+            .completed-task {
+                opacity: 0.7;
+                background: rgba(0, 214, 143, 0.1);
+                border-left-color: var(--success);
+            }
+            .overdue-task {
+                border-left-color: var(--danger);
+                background: rgba(255, 77, 109, 0.05);
+            }
+            .complete-btn { background: var(--success); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
+            .revert-btn { background: var(--warning); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
+            .edit-btn { background: var(--accent-primary); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
+            .delete-btn { background: var(--danger); color: white; border: none; padding: 4px 10px; border-radius: 16px; cursor: pointer; }
+            .add-task-btn {
+                background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+                color: white;
+                border: none;
+                cursor: pointer;
+            }
+            .add-task-btn:hover, .complete-btn:hover, .revert-btn:hover, .edit-btn:hover, .delete-btn:hover {
+                transform: scale(1.02);
+            }
+        `;
+        document.head.appendChild(style);
     }
-    updateStats();
 }
 
 // Функции для работы с датами
@@ -355,7 +506,7 @@ function renderTaskItem(task, isOverdue = false) {
                     `<button class="task-action-btn complete-btn" onclick="toggleTaskComplete('${task.id}')">✅ Выполнить</button>` :
                     `<button class="task-action-btn revert-btn" onclick="toggleTaskComplete('${task.id}')">↩️ Вернуть</button>`
                 }
-                ${window.isCurrentUserAdmin ? `
+                ${isUserAdmin() ? `
                     <button class="task-action-btn edit-btn" onclick="editTask('${task.id}')">✏️</button>
                     <button class="task-action-btn delete-btn" onclick="deleteTask('${task.id}')">🗑️</button>
                 ` : ''}
