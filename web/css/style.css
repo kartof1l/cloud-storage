@@ -1,0 +1,572 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    /* GitHub Dark True Colors */
+    --bg-primary: #0a0c10;        /* Еще темнее основной фон */
+    --bg-secondary: #0d1117;      /* GitHub классический */
+    --bg-tertiary: #151b23;       /* Темный с оттенком */
+    --bg-hover: #1a1f2a;          /* Для наведения */
+    --bg-inset: #010409;          /* Для модальных окон */
+    
+    --text-primary: #e6edf3;      /* Яркий белый текст */
+    --text-secondary: #b1bac4;     /* Серый текст */
+    --text-muted: #8b949e;         /* Приглушенный */
+    
+    --border-color: #3d444d;       /* Границы */
+    --border-strong: #656c76;       /* Яркие границы */
+    
+    --accent-color: #2f81f7;       /* GitHub синий */
+    --accent-hover: #3a8cff;        /* Синий при наведении */
+    --success-color: #238636;       /* Зеленый */
+    --success-hover: #2ea043;       /* Зеленый при наведении */
+    --danger-color: #f85149;        /* Красный */
+    --danger-hover: #ff7b72;        /* Красный при наведении */
+    
+    --header-bg: #151b23;           /* Шапка */
+    --sidebar-bg: #0d1117;          /* Боковая панель */
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    line-height: 1.6;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* Навигация - темная как смоль */
+.navbar {
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border-color);
+    padding: 16px 0;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.5);
+}
+
+.navbar .container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logo {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--accent-color);
+    text-shadow: 0 0 5px rgba(109, 110, 110, 0.579);
+}
+
+.nav-links a {
+    margin-left: 20px;
+    text-decoration: none;
+    color: var(--text-secondary);
+    transition: color 0.2s;
+}
+
+.nav-links a:hover {
+    color: var(--accent-color);
+}
+
+.btn-primary {
+    background: var(--success-color);
+    color: white !important;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.1);
+    font-weight: 500;
+}
+
+.btn-primary:hover {
+    background: var(--success-hover);
+    filter: brightness(100%);
+    border-color: rgba(255,255,255,0.2);
+}
+
+/* Hero секция */
+.hero {
+    background: var(--bg-secondary);
+    padding: 80px 0;
+    text-align: center;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.hero h1 {
+    font-size: 48px;
+    margin-bottom: 20px;
+    color: var(--text-primary);
+    text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+}
+
+.hero p {
+    font-size: 20px;
+    color: var(--text-secondary);
+    margin-bottom: 30px;
+}
+
+.btn-large {
+    display: inline-block;
+    background: var(--success-color);
+    color: white;
+    padding: 12px 28px;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 18px;
+    font-weight: 600;
+    border: 1px solid rgba(255,255,255,0.1);
+    transition: all 0.2s;
+}
+
+.btn-large:hover {
+    background: var(--success-hover);
+    filter: brightness(100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+}
+
+/* Особенности */
+.features {
+    padding: 60px 0;
+}
+
+.feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 30px;
+}
+
+.feature {
+    background: var(--bg-tertiary);
+    padding: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    text-align: center;
+    transition: all 0.2s;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+}
+
+.feature:hover {
+    border-color: var(--accent-color);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(0,0,0,0.4);
+}
+
+.feature-icon {
+    font-size: 48px;
+    margin-bottom: 20px;
+    filter: drop-shadow(0 4px 6px rgba(0,0,0,0.5));
+}
+
+.feature h3 {
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+
+.feature p {
+    color: var(--text-secondary);
+}
+
+/* Формы */
+.auth-form {
+    max-width: 400px;
+    margin: 60px auto;
+    background: var(--bg-tertiary);
+    padding: 40px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+.auth-form h2 {
+    margin-bottom: 30px;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    font-size: 16px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    transition: all 0.2s;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.2);
+}
+
+.btn-submit {
+    width: 100%;
+    padding: 12px;
+    background: var(--success-color);
+    color: white;
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn-submit:hover {
+    background: var(--success-hover);
+    filter: brightness(100%);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+}
+
+/* Дашборд */
+.dashboard {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    min-height: 100vh;
+    background: var(--bg-primary);
+}
+
+.sidebar {
+    background: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    padding: 20px;
+    box-shadow: 2px 0 10px rgba(0,0,0,0.3);
+}
+
+.sidebar-menu {
+    list-style: none;
+}
+
+.sidebar-menu li {
+    margin-bottom: 2px;
+}
+
+.sidebar-menu a {
+    display: block;
+    padding: 10px 12px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-radius: 6px;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+}
+
+.sidebar-menu a:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--border-color);
+}
+
+.sidebar-menu a.active {
+    background: var(--bg-hover);
+    color: var(--accent-color);
+    font-weight: 600;
+    border-color: var(--border-color);
+}
+
+.main-content {
+    padding: 30px;
+    background: var(--bg-primary);
+}
+
+/* Хлебные крошки */
+.breadcrumb {
+    margin-bottom: 20px;
+    padding: 12px 16px;
+    font-size: 14px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.breadcrumb a {
+    color: var(--accent-color);
+    text-decoration: none;
+}
+
+.breadcrumb a:hover {
+    text-decoration: underline;
+    color: var(--accent-hover);
+}
+
+.breadcrumb span {
+    color: var(--text-muted);
+}
+
+/* Область загрузки */
+.upload-area {
+    background: var(--bg-tertiary);
+    border: 2px dashed var(--border-color);
+    border-radius: 8px;
+    padding: 40px;
+    text-align: center;
+    margin-bottom: 30px;
+    cursor: pointer;
+    transition: all 0.3s;
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.3);
+}
+
+.upload-area:hover {
+    border-color: var(--accent-color);
+    background: var(--bg-hover);
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+}
+
+.upload-area h3 {
+    color: var(--text-primary);
+    margin-bottom: 5px;
+}
+
+.upload-area p {
+    color: var(--text-secondary);
+}
+
+/* Список файлов */
+.file-list {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.file-item {
+    display: flex;
+    align-items: center;
+    padding: 15px;
+    border-bottom: 1px solid var(--border-color);
+    transition: all 0.2s;
+}
+
+.file-item:hover {
+    background: var(--bg-hover);
+    transform: translateX(2px);
+}
+
+.file-item:last-child {
+    border-bottom: none;
+}
+
+.file-icon {
+    font-size: 24px;
+    margin-right: 15px;
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+}
+
+.file-info {
+    flex: 1;
+    cursor: pointer;
+}
+
+.file-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--text-primary);
+}
+
+.file-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.file-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.file-actions button {
+    padding: 6px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.file-actions button:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+}
+
+.btn-action {
+    background: var(--bg-primary);
+}
+
+.btn-danger:hover {
+    background: var(--danger-color) !important;
+    border-color: var(--danger-color) !important;
+    color: white !important;
+}
+
+/* Информация о пользователе */
+.user-info {
+    padding: 15px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    margin-top: 20px;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.user-info div:first-child {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+/* Пустое состояние */
+.empty-state {
+    text-align: center;
+    padding: 60px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: inset 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.empty-state h3 {
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+
+.empty-state p {
+    color: var(--text-muted);
+}
+
+/* Модальное окно */
+#folderModal {
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(3px);
+}
+
+#folderModal > div {
+    background: var(--bg-inset) !important;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 16px 32px rgba(0,0,0,0.8);
+}
+
+#folderModal h3 {
+    color: var(--text-primary);
+}
+
+#folderModal input {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+}
+
+#folderModal input:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(47, 129, 247, 0.2);
+}
+
+#folderModal button:first-of-type {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+#folderModal button:first-of-type:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+/* Футер */
+footer {
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border-color);
+    padding: 20px 0;
+    color: var(--text-muted);
+}
+
+/* Ссылки */
+a {
+    color: var(--accent-color);
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+a:hover {
+    color: var(--accent-hover);
+    text-decoration: underline;
+}
+
+/* Скроллбар в стиле GitHub */
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-primary);
+    border-left: 1px solid var(--border-color);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--bg-tertiary);
+    border: 2px solid var(--bg-primary);
+    border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--border-color);
+}
+
+/* Выделение текста */
+::selection {
+    background: var(--accent-color);
+    color: var(--bg-primary);
+}
+
+/* Дополнительные темные элементы */
+hr {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 20px 0;
+}
+
+code {
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+}
+
+/* Анимации */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.file-item {
+    animation: fadeIn 0.3s ease;
+}

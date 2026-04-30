@@ -1,0 +1,77 @@
+services:
+  - type: web
+    name: cloud-storage
+    runtime: go
+    buildCommand: go build -o cloud-storage ./cmd/api
+    startCommand: ./cloud-storage
+    envVars:
+      - key: SERVER_PORT
+        value: 8080
+      - key: ENV
+        value: production
+      - key: JWT_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: DB_HOST
+        fromDatabase:
+          name: cloud-storage-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: cloud-storage-db
+          property: port
+      - key: DB_USER
+        fromDatabase:
+          name: cloud-storage-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cloud-storage-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: cloud-storage-db
+          property: database
+      - key: DB_SSLMODE
+        value: require
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URL
+        sync: false
+      - key: YANDEX_CLIENT_ID
+        sync: false
+      - key: YANDEX_CLIENT_SECRET
+        sync: false
+      - key: YANDEX_REDIRECT_URL
+        sync: false
+      - key: VK_CLIENT_ID
+        sync: false
+      - key: VK_CLIENT_SECRET
+        sync: false
+      - key: VK_REDIRECT_URL
+        sync: false
+      - key: SMTP_EMAIL
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: LIBRARY_ADMINS
+        sync: false
+      - key: UPLOAD_PATH
+        value: /tmp/uploads
+      - key: MAX_FILE_SIZE
+        value: "104857600"
+    disk:
+      name: uploads
+      mountPath: /tmp/uploads
+      sizeGB: 10
+
+databases:
+  - name: cloud-storage-db
+    plan: free
+    databaseName: cloud_storage
+    user: cloudstorage

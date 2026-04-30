@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>CS — Библиотека</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/common.css">
+    <link rel="stylesheet" href="/css/admin.css">
+</head>
+<body>
+    <div class="menu-toggle" onclick="toggleSidebar()">🌀</div>
+
+    <div class="dashboard">
+        <aside class="sidebar" id="sidebar">
+            <div class="logo">
+                <div class="logo-icon">🌀</div>
+                <div class="logo-text">CS</div>
+            </div>
+
+            <div class="user-profile" onclick="window.location.href='/dashboard.html'">
+                <div class="user-avatar" id="userAvatar">👤</div>
+                <div class="user-name" id="userName">Загрузка...</div>
+                <div class="user-email" id="userEmail">загрузка...</div>
+            </div>
+
+            <div class="storage-stats">
+                <div class="stats-header"><span>💠</span> Библиотека</div>
+                <div class="stats-used" id="storageUsed">0 MB</div>
+                <div class="stats-bar"><div class="stats-bar-fill" id="storageBar"></div></div>
+                <div class="stats-details" id="storageDetails">0 файлов • 0 папок</div>
+            </div>
+
+            <ul class="sidebar-menu">
+                <li><a href="/dashboard.html" id="navHome"><span>🌌</span> Мои файлы</a></li>
+                <li><a href="/library.html" class="active" id="navLibrary"><span>📖</span> Библиотека</a></li>
+                <li><a href="/admin.html" id="navAdmin" style="display: none;"><span>👑</span> Админ панель</a></li>
+                <li><a onclick="logout()" style="color: var(--danger);"><span>🚀</span> Выйти</a></li>
+            </ul>
+        </aside>
+
+        <main class="main-content">
+            <div class="top-bar">
+    <div class="breadcrumb" id="breadcrumb">
+        <a onclick="loadRoot()">📚 Библиотека</a>
+    </div>
+    <div class="action-buttons" id="adminButtons">
+        <button class="btn" onclick="goBack()" id="backButton">
+            <span>↩️</span> <span>Назад</span>
+        </button>
+        <button class="btn btn-primary" onclick="showCreateFolderModal()">
+            <span>📁</span> <span>Папка</span>
+        </button>
+        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
+            <span>☁️</span> <span>Загрузить</span>
+        </button>
+    </div>
+</div>
+
+            <div class="bubbles-section" id="bubblesSection">
+                <div class="section-title"><span>🌀</span> Папки</div>
+                <div class="bubbles-grid" id="bubblesContainer"></div>
+            </div>
+
+            <div class="files-section" id="filesSection">
+                <div class="section-title"><span>✨</span> Файлы</div>
+                <div class="files-grid" id="fileGrid"></div>
+            </div>
+
+            <div class="empty-state" id="emptyState" style="display: none;">
+                <div style="font-size: 64px;">📚</div>
+                <h3>Пусто</h3>
+                <p>Материалы пока не добавлены</p>
+            </div>
+
+            <input type="file" id="fileInput" multiple style="display: none;" onchange="uploadFiles(this.files)">
+        </main>
+    </div>
+
+    <!-- Модальное окно выбора директории для библиотеки -->
+    <div class="folder-picker-modal" id="folderPicker">
+        <div class="folder-picker-content">
+            <div class="folder-picker-title">📁 Выберите папку для перемещения</div>
+            <div id="folderPickerList"></div>
+            <div style="margin-top: 16px; text-align: center;">
+                <button class="btn" onclick="closeFolderPicker()">Отмена</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="folderModal">
+        <div class="modal-content">
+            <div class="modal-title">📁 Новая папка</div>
+            <input type="text" class="modal-input" id="folderName" placeholder="Название папки">
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeFolderModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="createFolder()">Создать</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="renameModal">
+        <div class="modal-content">
+            <div class="modal-title">✏️ Переименовать</div>
+            <input type="text" class="modal-input" id="renameInput" placeholder="Новое название">
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeRenameModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="renameSubmit()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <script nonce="{{ .CSPNonce }}" src="/js/common.js"></script>
+    <script nonce="{{ .CSPNonce }}" src="/js/library.js"></script>
+</body>
+</html>

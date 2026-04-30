@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>CS — Мои файлы</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/common.css">
+    <link rel="stylesheet" href="/css/admin.css">
+    <link rel="stylesheet" href="/css/schedule.css">
+</head>
+<body>
+    <div class="menu-toggle" onclick="toggleSidebar()">🌀</div>
+
+    <div class="dashboard">
+        <aside class="sidebar" id="sidebar">
+            <div class="logo">
+                <div class="logo-icon">🌀</div>
+                <div class="logo-text">CS</div>
+            </div>
+
+            <div class="user-profile" onclick="showProfileModal()">
+                <div class="user-avatar" id="userAvatar">👤</div>
+                <div class="user-name" id="userName">Загрузка...</div>
+                <div class="user-email" id="userEmail">загрузка...</div>
+            </div>
+
+            <div class="storage-stats">
+                <div class="stats-header"><span>💾</span> Облако</div>
+                <div class="stats-used" id="storageUsed">0 MB</div>
+                <div class="stats-bar"><div class="stats-bar-fill" id="storageBar"></div></div>
+                <div class="stats-details" id="storageDetails">0 файлов • 0 папок</div>
+            </div>
+
+            <ul class="sidebar-menu">
+                <li><a onclick="loadRootFiles()" id="navHome"><span>🌌</span> Мои файлы</a></li>
+                <li><a onclick="loadLibrary()" id="navLibrary"><span>📖</span> Библиотека</a></li>
+                <li><a href="/admin.html" id="navAdmin" style="display: none;"><span>👑</span> Админ панель</a></li>
+                <li><a onclick="logout()" style="color: var(--danger);"><span>🚀</span> Выйти</a></li>
+            </ul>
+        </aside>
+
+        <main class="main-content">
+            <!-- Вкладки навигации -->
+            <div class="content-tabs">
+                <button class="tab-btn active" data-tab="files" onclick="switchContentTab('files')">📁 Мои файлы</button>
+                <button class="tab-btn" data-tab="schedule" onclick="switchContentTab('schedule')">📅 Расписание</button>
+            </div>
+
+            <!-- Контент файлов -->
+            <div id="filesContent" class="tab-content active">
+                <div class="upload-bar" onclick="document.getElementById('fileInput').click()">
+                    <div class="upload-bar-left">
+                        <div class="upload-icon">⬆️</div>
+                        <div>
+                            <div class="upload-text">Перетащите файлы</div>
+                            <div class="upload-hint">или нажмите</div>
+                        </div>
+                    </div>
+                    <div class="upload-hint">пока небольшие файлы</div>
+                    <input type="file" id="fileInput" multiple style="display: none;" onchange="uploadFiles(this.files)">
+                </div>
+
+                <div class="top-actions">
+                    <div class="breadcrumb" id="breadcrumb">
+                        <a onclick="loadRootFiles()">🌌 Главная</a>
+                    </div>
+                    <div class="action-buttons">
+                        <button class="btn" onclick="goBack()" id="backButton">
+                            <span>↩️</span> <span>Назад</span>
+                        </button>
+                        <button class="btn btn-primary" onclick="showCreateFolderModal()">
+                            <span>📁</span> <span>Папка</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bubbles-section" id="bubblesSection">
+                    <div class="section-title"><span>🌀</span> Папки</div>
+                    <div class="bubbles-grid" id="bubblesContainer"></div>
+                </div>
+
+                <div class="files-section" id="filesSection">
+                    <div class="section-title"><span>✨</span> Файлы</div>
+                    <div class="files-grid" id="fileGrid"></div>
+                </div>
+
+                <div class="empty-state" id="emptyState" style="display: none;">
+                    <div style="font-size: 48px;">🌌</div>
+                    <h3>Пусто</h3>
+                    <p>Загрузите файлы или создайте папку</p>
+                    <button class="btn btn-primary" onclick="showCreateFolderModal()" style="margin-top: 16px;">
+                        Создать папку
+                    </button>
+                </div>
+            </div>
+
+            <!-- Контент расписания -->
+            <div id="scheduleContent" class="tab-content" style="display: none;">
+                <div class="schedule-header">
+                    <h2>📋 Мои задачи</h2>
+                    <div class="view-toggle">
+                        <button class="view-btn active" data-view="calendar" onclick="switchView('calendar')">📅 Календарь</button>
+                        <button class="view-btn" data-view="list" onclick="switchView('list')">📝 Список</button>
+                    </div>
+                </div>
+
+                <!-- Статистика -->
+                <div id="tasksStats" class="tasks-stats"></div>
+
+                <!-- Быстрое добавление (только для админов) -->
+                <div id="quickAddBlock" style="display: none;">
+                    <div class="quick-add-task">
+                        <input type="text" id="quickTaskTitle" placeholder="Новая задача...">
+                        <select id="quickTaskPriority">
+                            <option value="high">🔴 Высокий</option>
+                            <option value="medium" selected>🟡 Средний</option>
+                            <option value="low">🟢 Низкий</option>
+                        </select>
+                        <button class="btn btn-primary" onclick="quickAddTask()">+ Добавить</button>
+                    </div>
+                </div>
+
+                <!-- Календарный вид -->
+                <div id="calendarView" class="calendar-view active">
+                    <div class="week-nav">
+                        <button class="btn" onclick="changeWeek(-1)">◀ Предыдущая</button>
+                        <span class="current-week" id="currentWeekLabel">Неделя</span>
+                        <button class="btn" onclick="changeWeek(1)">Следующая ▶</button>
+                        <button class="btn btn-primary" onclick="goToToday()">📅 Сегодня</button>
+                    </div>
+                    <div class="schedule-grid" id="scheduleGrid"></div>
+                </div>
+
+                <!-- Списковый вид -->
+                <div id="listView" class="tasks-list">
+                    <div id="tasksListContainer"></div>
+                </div>
+            </div>
+
+    <div id="backNavZone" class="back-nav-zone hidden">
+        <span>⬅️</span> Перетащите сюда для возврата
+    </div>
+
+    <!-- Модальное окно администрирования -->
+    <div class="modal" id="adminModal">
+        <div class="modal-content">
+            <div class="modal-title">👑 Администраторы</div>
+            <div id="adminListContainer" class="admin-list">
+                <div style="text-align:center;padding:20px;">Загрузка...</div>
+            </div>
+            <div class="admin-add">
+                <input type="email" id="newAdminEmail" placeholder="Email нового администратора">
+                <button class="btn btn-primary" onclick="addAdmin()">➕ Добавить</button>
+            </div>
+            <div class="modal-buttons" style="margin-top: 20px;">
+                <button class="btn" onclick="closeAdminModal()">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно профиля -->
+    <div class="modal" id="profileModal">
+        <div class="modal-content">
+            <div class="modal-title">Редактировать профиль</div>
+            <div class="avatar-upload">
+                <div class="avatar-preview" id="avatarPreview">👤</div>
+                <input type="file" id="avatarInput" accept="image/*" style="display: none;">
+                <button class="btn" onclick="document.getElementById('avatarInput').click()">Загрузить фото</button>
+            </div>
+            <input type="text" class="modal-input" id="editFirstName" placeholder="Имя">
+            <input type="text" class="modal-input" id="editLastName" placeholder="Фамилия">
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeProfileModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="saveProfile()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно создания папки -->
+    <div class="modal" id="folderModal">
+        <div class="modal-content">
+            <div class="modal-title">Новая папка</div>
+            <input type="text" class="modal-input" id="folderName" placeholder="Название папки">
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeFolderModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="createFolder()">Создать</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно переименования -->
+    <div class="modal" id="renameModal">
+        <div class="modal-content">
+            <div class="modal-title">✏️ Переименовать</div>
+            <input type="text" class="modal-input" id="renameInput" placeholder="Новое название">
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeRenameModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="renameSubmit()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно добавления/редактирования события -->
+    <div class="modal" id="eventModal">
+        <div class="modal-content">
+            <div class="modal-title" id="eventModalTitle">➕ Добавить событие</div>
+            <input type="text" class="modal-input" id="eventTitle" placeholder="Название мероприятия">
+            <input type="date" class="modal-input" id="eventDate">
+            <input type="time" class="modal-input" id="eventTime">
+            <textarea class="modal-input" id="eventDescription" placeholder="Описание мероприятия" rows="3"></textarea>
+            <select class="modal-input" id="eventType">
+                <option value="meeting">🎯 Встреча</option>
+                <option value="deadline">⏰ Дедлайн</option>
+                <option value="reminder">🔔 Напоминание</option>
+                <option value="other">📌 Другое</option>
+            </select>
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeEventModal()">Отмена</button>
+                <button class="btn btn-primary" onclick="saveEvent()">Сохранить</button>
+            </div>
+        </div>
+    </div>
+    <!-- Модальное окно задачи -->
+<div class="modal" id="taskModal">
+    <div class="modal-content modal-content-large">
+        <div class="modal-title" id="taskModalTitle">➕ Новая задача</div>
+        <div class="task-form-group">
+            <label>Название задачи *</label>
+            <input type="text" id="taskTitle" placeholder="Что нужно сделать?">
+        </div>
+        <div class="task-form-group">
+            <label>Описание</label>
+            <textarea id="taskDescription" rows="2" placeholder="Дополнительные детали..."></textarea>
+        </div>
+        <div class="task-form-row">
+            <div class="task-form-group">
+                <label>Дата</label>
+                <input type="date" id="taskDueDate">
+            </div>
+            <div class="task-form-group">
+                <label>Время</label>
+                <input type="time" id="taskDueTime">
+            </div>
+        </div>
+        <div class="task-form-group">
+            <label>Приоритет</label>
+            <select id="taskPriority">
+                <option value="high">🔴 Высокий</option>
+                <option value="medium" selected>🟡 Средний</option>
+                <option value="low">🟢 Низкий</option>
+            </select>
+        </div>
+        <div class="modal-buttons">
+            <button class="btn" onclick="closeTaskModal()">Отмена</button>
+            <button class="btn btn-primary" onclick="saveTask()">Сохранить</button>
+        </div>
+    </div>
+</div>
+    <script nonce="{{ .CSPNonce }}" src="/js/common.js"></script>
+    <script nonce="{{ .CSPNonce }}" src="/js/dashboard.js"></script>
+    <script nonce="{{ .CSPNonce }}" src="/js/schedule.js"></script>
+</body>
+</html>

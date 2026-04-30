@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
+    <title>CS Cloud — Админ панель</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext x='50' y='85' font-size='80' text-anchor='middle' dominant-baseline='middle'%3E🌀%3C/text%3E%3C/svg%3E">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/common.css">
+    <link rel="stylesheet" href="/css/admin.css">
+    <style>
+        /* Дополнительные стили для админ-панели */
+        .admin-panel-container {
+            padding: 20px;
+        }
+        
+        .admin-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid var(--border-glow);
+            padding-bottom: 12px;
+        }
+        
+        .admin-tab {
+            padding: 10px 20px;
+            background: var(--bg-card);
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 1px solid var(--border-glow);
+        }
+        
+        .admin-tab.active {
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            color: white;
+            border-color: transparent;
+        }
+        
+        .admin-tab:hover {
+            transform: translateY(-2px);
+        }
+        
+        .users-table, .logs-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--bg-card);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+        
+        .users-table th, .logs-table th,
+        .users-table td, .logs-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-glow);
+        }
+        
+        .users-table th, .logs-table th {
+            background: var(--bg-card-solid);
+            font-weight: 600;
+            color: var(--accent-primary);
+        }
+        
+        .user-status {
+            padding: 4px 8px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        
+        .user-status.active {
+            background: rgba(0, 214, 143, 0.2);
+            color: var(--success);
+        }
+        
+        .user-status.blocked {
+            background: rgba(255, 77, 109, 0.2);
+            color: var(--danger);
+        }
+        
+        .user-status.admin {
+            background: rgba(110, 74, 255, 0.2);
+            color: var(--accent-primary);
+        }
+        
+        .storage-limit {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .storage-limit input {
+            width: 80px;
+            padding: 4px 8px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-glow);
+            border-radius: 20px;
+            color: white;
+            font-size: 12px;
+        }
+        
+        .action-btn {
+            padding: 4px 8px;
+            border-radius: 20px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin: 0 2px;
+            display: inline-block;
+        }
+        
+        .action-btn.view-logs {
+            background: var(--accent-primary);
+            color: white;
+        }
+        
+        .action-btn.block {
+            background: var(--danger);
+            color: white;
+        }
+        
+        .action-btn.unblock {
+            background: var(--success);
+            color: white;
+        }
+        
+        .action-btn.set-limit {
+            background: var(--warning);
+            color: white;
+        }
+        
+        .action-btn:hover {
+            transform: scale(1.05);
+        }
+        
+        .logs-filter {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .logs-filter input, .logs-filter select {
+            padding: 8px 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-glow);
+            border-radius: 30px;
+            color: white;
+        }
+        
+        .pagination {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 20px;
+        }
+        
+        .pagination button {
+            padding: 6px 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-glow);
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        
+        .pagination button.active {
+            background: var(--accent-primary);
+            color: white;
+        }
+        
+        .user-detail-modal {
+            max-width: 800px;
+        }
+        
+        .user-info {
+            background: var(--bg-primary);
+            padding: 16px;
+            border-radius: 16px;
+            margin-bottom: 20px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+        
+        .stat-card {
+            background: var(--bg-card);
+            padding: 12px;
+            border-radius: 12px;
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent-primary);
+        }
+        
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="menu-toggle" onclick="toggleSidebar()">✨</div>
+
+    <div class="dashboard">
+        <aside class="sidebar" id="sidebar">
+            <div class="logo">
+                <div class="logo-icon">🌀</div>
+                <div class="logo-text">CS Cloud</div>
+            </div>
+
+            <div class="user-profile" onclick="window.location.href='/dashboard.html'">
+                <div class="user-avatar" id="userAvatar">👤</div>
+                <div class="user-name" id="userName">Загрузка...</div>
+                <div class="user-email" id="userEmail">загрузка...</div>
+            </div>
+
+            <ul class="sidebar-menu">
+                <li><a href="/dashboard.html" id="navHome"><span>🌌</span> Мои файлы</a></li>
+                <li><a href="/library.html" id="navLibrary"><span>📖</span> Библиотека</a></li>
+                <li><a href="/admin.html" class="active" id="navAdmin"><span>👑</span> Админ панель</a></li>
+                <li><a onclick="logout()" style="color: var(--danger);"><span>🚀</span> Выйти</a></li>
+            </ul>
+        </aside>
+
+        <main class="main-content">
+            <div class="admin-panel-container">
+                <h1 style="margin-bottom: 24px;">👑 Админ панель</h1>
+                
+                <div class="admin-tabs">
+                    <div class="admin-tab active" onclick="switchTab('users')">👥 Пользователи</div>
+                    <div class="admin-tab" onclick="switchTab('admins')">👑 Администраторы</div>
+                    <div class="admin-tab" onclick="switchTab('logs')">📋 Логи действий</div>
+                    <div class="admin-tab" onclick="switchTab('stats')">📊 Статистика</div>
+                </div>
+                <!-- Вкладка администраторов -->
+                <div id="adminsTab" class="tab-content" style="display: none;">
+                    <div class="admin-panel">
+                        <div class="admin-title">👑 Управление администраторами</div>
+                        <div class="admin-add" style="margin-bottom: 20px;">
+                            <input type="email" id="newAdminEmail" placeholder="Email нового администратора" style="flex: 1; padding: 12px; background: var(--bg-primary); border: 1px solid var(--border-glow); border-radius: 30px; color: white;">
+                            <button class="btn btn-primary" onclick="addNewAdmin()">➕ Добавить администратора</button>
+                        </div>
+                        <div id="adminsList">
+                            <div class="empty-state">Загрузка...</div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Вкладка пользователей -->
+                <div id="usersTab" class="tab-content">
+                    <div class="logs-filter" style="margin-bottom: 20px;">
+                        <input type="text" id="userSearch" placeholder="Поиск по email..." onkeyup="searchUsers()">
+                    </div>
+                    <div id="usersList"></div>
+                    <div class="pagination" id="usersPagination"></div>
+                </div>
+                
+                <!-- Вкладка логов -->
+                <div id="logsTab" class="tab-content" style="display: none;">
+                    <div class="logs-filter">
+                        <input type="text" id="logSearch" placeholder="Поиск..." onkeyup="searchLogs()">
+                        <select id="logAction" onchange="filterLogs()">
+                            <option value="">Все действия</option>
+                            <option value="upload">Загрузка</option>
+                            <option value="download">Скачивание</option>
+                            <option value="delete">Удаление</option>
+                            <option value="create_folder">Создание папки</option>
+                            <option value="library_upload">Загрузка в библиотеку</option>
+                            <option value="library_delete">Удаление из библиотеки</option>
+                        </select>
+                        <input type="date" id="logDate" onchange="filterLogs()">
+                    </div>
+                    <div id="logsList"></div>
+                    <div class="pagination" id="logsPagination"></div>
+                </div>
+                
+                <!-- Вкладка настроек -->
+                <div id="settingsTab" class="tab-content" style="display: none;">
+                    <div class="admin-panel">
+                        <div class="admin-title">⚙️ Настройки системы</div>
+                        <div class="admin-item">
+                            <span>Максимальный размер хранилища по умолчанию</span>
+                            <div class="storage-limit">
+                                <input type="number" id="defaultStorageLimit" value="100" step="50">
+                                <span>MB</span>
+                                <button class="action-btn set-limit" onclick="updateDefaultLimit()">Сохранить</button>
+                            </div>
+                        </div>
+                        <div class="admin-item">
+                            <span>Максимальный размер файла</span>
+                            <div class="storage-limit">
+                                <input type="number" id="maxFileSize" value="100" step="10">
+                                <span>MB</span>
+                                <button class="action-btn set-limit" onclick="updateMaxFileSize()">Сохранить</button>
+                            </div>
+                        </div>
+                        <div class="admin-item">
+                            <span>Очистка неактивных пользователей (дней)</span>
+                            <div class="storage-limit">
+                                <input type="number" id="inactiveDays" value="30" step="7">
+                                <span>дней</span>
+                                <button class="action-btn set-limit" onclick="cleanInactiveUsers()">Очистить</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Модальное окно просмотра логов пользователя -->
+    <div class="modal" id="userLogsModal">
+        <div class="modal-content user-detail-modal">
+            <div class="modal-title">📋 Логи пользователя: <span id="modalUserName"></span></div>
+            <div class="user-info">
+                <div><strong>Email:</strong> <span id="modalUserEmail"></span></div>
+                <div><strong>Статус:</strong> <span id="modalUserStatus"></span></div>
+                <div><strong>Использовано места:</strong> <span id="modalUserStorage"></span></div>
+                <div><strong>Лимит:</strong> <span id="modalUserLimit"></span></div>
+            </div>
+            <div id="userLogsList"></div>
+            <div class="modal-buttons">
+                <button class="btn" onclick="closeUserLogsModal()">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/common.js"></script>
+    <script src="/js/admin.js"></script>
+</body>
+</html>
