@@ -1,47 +1,48 @@
 package middleware
 
 import (
-	"crypto/rand"
-	"encoding/base64"
+"crypto/rand"
+"encoding/base64"
+"fmt"
 
-	"github.com/gin-gonic/gin"
+"github.com/gin-gonic/gin"
 )
 
-// generateNonce создает случайный nonce для CSP
 func generateNonce() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return base64.StdEncoding.EncodeToString(b)
+b := make([]byte, 16)
+rand.Read(b)
+return base64.StdEncoding.EncodeToString(b)
 }
 
-// SecurityHeadersMiddleware добавляет заголовки безопасности
 func SecurityHeadersMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Временно отключаем CSP для отладки
-		// c.Header("Content-Security-Policy", "...")
+return func(c *gin.Context) {
+nonce := generateNonce()
 
-		// Оставляем остальные заголовки
-		c.Header("X-XSS-Protection", "1; mode=block")
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+c.Header("Content-Security-Policy", 
+fmt.Sprintf("default-src 'self'; script-src 'self' 'nonce-%s'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:;", nonce))
+c.Header("X-XSS-Protection", "1; mode=block")
+c.Header("X-Content-Type-Options", "nosniff")
+c.Header("X-Frame-Options", "DENY")
+c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+c.Header("X-Permitted-Cross-Domain-Policies", "none")
+c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 
-		c.Next()
-	}
+c.Set("nonce", nonce)
+c.Next()
+}
 }
 
-// SanitizeInputMiddleware очищает входные данные
 func SanitizeInputMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Проверяем Content-Type
-		contentType := c.GetHeader("Content-Type")
-		if contentType != "" && contentType != "application/json" &&
-			contentType != "multipart/form-data" &&
-			contentType != "application/x-www-form-urlencoded" {
-			c.JSON(415, gin.H{"error": "Unsupported Media Type"})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
+return func(c *gin.Context) {
+contentType := c.GetHeader("Content-Type")
+if contentType != "" && 
+contentType != "application/json" &&
+contentType != "multipart/form-data" &&
+contentType != "application/x-www-form-urlencoded" {
+c.JSON(415, gin.H{"error": "Unsupported Media Type"})
+c.Abort()
+return
+}
+c.Next()
+}
 }

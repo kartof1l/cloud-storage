@@ -1,4 +1,4 @@
-package repository
+﻿package repository
 
 import (
 	"database/sql"
@@ -21,7 +21,6 @@ func (r *ScheduleRepository) DB() *sql.DB {
 	return r.db
 }
 
-// Task methods
 func (r *ScheduleRepository) CreateTask(task *models.ScheduleTask) error {
 	task.ID = uuid.New().String()
 	task.CreatedAt = time.Now()

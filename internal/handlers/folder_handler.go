@@ -1,4 +1,4 @@
-﻿package handlers
+package handlers
 
 import (
 	"cloud-storage-go/internal/middleware"

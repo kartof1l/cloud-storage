@@ -144,4 +144,4 @@ CREATE TABLE IF NOT EXISTS schedule_tasks (
 -- Индексы для быстрого поиска
 CREATE INDEX IF NOT EXISTS idx_schedule_tasks_date ON schedule_tasks(due_date);
 CREATE INDEX IF NOT EXISTS idx_schedule_tasks_created_by ON schedule_tasks(created_by);
-CREATE INDEX IF NOT EXISTS idx_schedule_tasks_completed ON schedule_tasks(completed);
+CREATE INDEX IF NOT EXISTS idx_schedule_99,,88tasks_completed ON schedule_tasks(completed);

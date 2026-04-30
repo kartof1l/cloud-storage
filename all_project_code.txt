@@ -1,0 +1,5955 @@
+﻿=== Z:\GoPro\cloud-storage-go\cmd\api\main.go ===
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+
+	"golang.org/x/time/rate"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	_ "github.com/lib/pq"
+
+	"cloud-storage-go/internal/config"
+	"cloud-storage-go/internal/crypto"
+	"cloud-storage-go/internal/database"
+	"cloud-storage-go/internal/handlers"
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/oauth"
+	"cloud-storage-go/internal/repository"
+	"cloud-storage-go/internal/services"
+	"cloud-storage-go/internal/utils"
+)
+
+func main() {
+	// Rate limiters
+	uploadLimiter := rate.NewLimiter(5, 10)
+	authLimiter := rate.NewLimiter(3, 5)
+	apiLimiter := rate.NewLimiter(10, 30)
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal("Failed to load config:", err)
+	}
+
+	db, err := database.Connect(cfg)
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+	defer db.Close()
+
+	if err := database.CreateTables(db); err != nil {
+		log.Fatal("Failed to create tables:", err)
+	}
+
+	log.Println("Database connected successfully!")
+	avatarBasePath := filepath.Join(cfg.UploadPath, "avatars")
+	if err := os.MkdirAll(avatarBasePath, 0755); err != nil {
+		log.Printf("Warning: could not create avatars base dir: %v", err)
+	}
+
+	// Репозитории
+	userRepo := repository.NewUserRepository(db)
+	fileRepo := repository.NewFileRepository(db)
+	oauthRepo := repository.NewOAuthRepository(db)
+	libRepo := repository.NewLibraryRepository(db)
+	auditRepo := repository.NewAuditRepository(db)
+	auditService := services.NewAuditService(auditRepo)
+	scheduleRepo := repository.NewScheduleRepository(db)
+
+	// Утилиты
+	jwtUtil := utils.NewJWTUtil(cfg.JWTSecret, cfg.JWTExpiresIn)
+	encryptionService := crypto.NewEncryptionService(cfg.JWTSecret)
+
+	// Сервисы
+	storageService := services.NewStorageService(cfg.UploadPath)
+	emailService := services.NewEmailService()
+	libraryService := services.NewLibraryService(libRepo, userRepo, encryptionService, cfg.UploadPath, auditService)
+
+	authService := services.NewAuthService(userRepo, oauthRepo, jwtUtil, emailService)
+	fileService := services.NewFileService(fileRepo, storageService, auditService, userRepo)
+
+	// Инициализация администраторов
+	if len(cfg.LibraryAdmins) > 0 {
+		var initiatorID uuid.UUID
+		err := db.QueryRow("SELECT id FROM users WHERE email = $1", cfg.LibraryAdmins[0]).Scan(&initiatorID)
+		if err != nil {
+			initiatorID = uuid.New()
+			log.Printf("Warning: admin user %s not found, using temporary ID", cfg.LibraryAdmins[0])
+		}
+		if err := libraryService.InitAdminsFromConfig(cfg.LibraryAdmins, initiatorID); err != nil {
+			log.Printf("Warning: failed to init admins: %v", err)
+		} else {
+			log.Printf("✅ Initialized %d admins from .env", len(cfg.LibraryAdmins))
+		}
+	}
+
+	// OAuth провайдеры
+	googleProvider := oauth.NewGoogleProvider(
+		os.Getenv("GOOGLE_CLIENT_ID"),
+		os.Getenv("GOOGLE_CLIENT_SECRET"),
+		os.Getenv("GOOGLE_REDIRECT_URL"),
+	)
+	yandexProvider := oauth.NewYandexProvider(
+		os.Getenv("YANDEX_CLIENT_ID"),
+		os.Getenv("YANDEX_CLIENT_SECRET"),
+		os.Getenv("YANDEX_REDIRECT_URL"),
+	)
+	vkProvider := oauth.NewVKProvider(
+		os.Getenv("VK_CLIENT_ID"),
+		os.Getenv("VK_CLIENT_SECRET"),
+		os.Getenv("VK_REDIRECT_URL"),
+	)
+
+	// Сессии
+	sessionConfig := &middleware.SessionConfig{
+		SecretKey: os.Getenv("SESSION_SECRET"),
+		MaxAge:    86400 * 7,
+		Secure:    false,
+		HttpOnly:  true,
+		SameSite:  http.SameSiteLaxMode,
+	}
+	sessionManager := middleware.NewSessionManager(sessionConfig)
+
+	// Хендлеры
+	authHandler := handlers.NewAuthHandler(authService)
+	fileHandler := handlers.NewFileHandler(fileService)
+	folderHandler := handlers.NewFolderHandler(fileService)
+	libraryHandler := handlers.NewLibraryHandler(libraryService)
+	userHandler := handlers.NewUserHandler(userRepo, cfg.UploadPath)
+	adminHandler := handlers.NewAdminHandler(userRepo, auditService, libraryService, db)
+	scheduleHandler := handlers.NewScheduleHandler(scheduleRepo, userRepo)
+
+	oauthHandler := handlers.NewOAuthHandler(
+		googleProvider, yandexProvider, vkProvider,
+		sessionManager, authService,
+	)
+
+	// Роутер
+	router := gin.Default()
+
+	// CORS - ПРОСТАЯ ВЕРСИЯ ДЛЯ РАЗРАБОТКИ
+	router.Use(cors.Default())
+
+	// Только базовые middleware
+	router.Use(sessionManager.SessionMiddleware())
+
+	// ========== СТАТИЧЕСКИЕ ФАЙЛЫ ==========
+	router.Static("/css", "./web/css")
+	router.Static("/js", "./web/js")
+	router.Static("/uploads", cfg.UploadPath)
+
+	// HTML страницы
+	router.StaticFile("/", "./web/index.html")
+	router.StaticFile("/login", "./web/login.html")
+	router.StaticFile("/register", "./web/register.html")
+	router.StaticFile("/admin", "./web/admin.html")
+	router.StaticFile("/admin.html", "./web/admin.html")
+	router.StaticFile("/dashboard", "./web/dashboard.html")
+	router.StaticFile("/library", "./web/library.html")
+	router.StaticFile("/verify", "./web/verify.html")
+	router.StaticFile("/status", "./web/status.html")
+
+	// Редиректы
+	router.GET("/login.html", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/login") })
+	router.GET("/register.html", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/register") })
+	router.GET("/dashboard.html", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/dashboard") })
+	router.GET("/library.html", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/library") })
+
+	// API маршруты
+	auth := router.Group("/api/auth")
+	{
+		auth.POST("/register", rateLimitMiddleware(authLimiter), authHandler.Register)
+		auth.POST("/login", rateLimitMiddleware(authLimiter), authHandler.Login)
+		auth.POST("/verify", rateLimitMiddleware(authLimiter), authHandler.VerifyEmail)
+		auth.POST("/resend-code", rateLimitMiddleware(authLimiter), authHandler.ResendCode)
+		auth.GET("/:provider/login", oauthHandler.Login)
+		auth.GET("/:provider/callback", oauthHandler.Callback)
+	}
+
+	protected := router.Group("/api")
+	protected.Use(middleware.AuthMiddleware(jwtUtil))
+	{
+		protected.POST("/files/upload", rateLimitMiddleware(uploadLimiter), fileHandler.UploadFile)
+		protected.GET("/files", rateLimitMiddleware(apiLimiter), fileHandler.ListFiles)
+		protected.GET("/storage/stats", rateLimitMiddleware(apiLimiter), fileHandler.GetStorageStats)
+		protected.GET("/files/:id", rateLimitMiddleware(apiLimiter), fileHandler.GetFile)
+		protected.GET("/files/:id/download", rateLimitMiddleware(apiLimiter), fileHandler.DownloadFile)
+		protected.DELETE("/files/:id", rateLimitMiddleware(apiLimiter), fileHandler.DeleteFile)
+		protected.PUT("/files/:id", rateLimitMiddleware(apiLimiter), fileHandler.RenameFile)
+
+		protected.POST("/folders", rateLimitMiddleware(apiLimiter), folderHandler.CreateFolder)
+		protected.GET("/folders/:id/contents", rateLimitMiddleware(apiLimiter), folderHandler.GetFolderContents)
+		protected.DELETE("/folders/:id", rateLimitMiddleware(apiLimiter), folderHandler.DeleteFolder)
+		protected.PUT("/folders/:id", rateLimitMiddleware(apiLimiter), folderHandler.RenameFolder)
+		protected.PUT("/files/:id/move", rateLimitMiddleware(apiLimiter), fileHandler.MoveFile)
+		protected.PUT("/folders/:id/move", rateLimitMiddleware(apiLimiter), folderHandler.MoveFolder)
+
+		// Админ маршруты
+		admin := protected.Group("/admin")
+		{
+			admin.GET("/users", rateLimitMiddleware(apiLimiter), adminHandler.GetAllUsers)
+			admin.GET("/users/by-email/:email", rateLimitMiddleware(apiLimiter), adminHandler.GetUserByEmail)
+			admin.POST("/users/:id/block", rateLimitMiddleware(apiLimiter), adminHandler.ToggleUserBlock)
+			admin.POST("/users/:id/limit", rateLimitMiddleware(apiLimiter), adminHandler.SetUserStorageLimit)
+			admin.POST("/users/clean-inactive", rateLimitMiddleware(apiLimiter), adminHandler.CleanInactiveUsers)
+			admin.GET("/logs", rateLimitMiddleware(apiLimiter), adminHandler.GetAllLogs)
+			admin.GET("/logs/user/:email", rateLimitMiddleware(apiLimiter), adminHandler.GetUserLogs)
+			admin.POST("/settings/default-limit", rateLimitMiddleware(apiLimiter), adminHandler.SetDefaultLimit)
+			admin.POST("/settings/max-file-size", rateLimitMiddleware(apiLimiter), adminHandler.SetMaxFileSize)
+		}
+
+		protected.GET("/user/me", rateLimitMiddleware(apiLimiter), func(c *gin.Context) {
+			userID, exists := middleware.GetUserID(c)
+			if !exists {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+				return
+			}
+			user, err := userRepo.GetByID(userID)
+			if err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+				return
+			}
+			c.JSON(http.StatusOK, user)
+		})
+		protected.PUT("/user/me", rateLimitMiddleware(apiLimiter), userHandler.UpdateProfile)
+		protected.POST("/user/avatar", rateLimitMiddleware(uploadLimiter), userHandler.UploadAvatar)
+
+		// Библиотека
+		library := protected.Group("/library")
+		{
+			library.GET("/items", rateLimitMiddleware(apiLimiter), libraryHandler.GetItems)
+			library.POST("/folders", rateLimitMiddleware(apiLimiter), libraryHandler.CreateFolder)
+			library.POST("/upload", rateLimitMiddleware(uploadLimiter), libraryHandler.UploadFile)
+			library.GET("/items/:id/download", rateLimitMiddleware(apiLimiter), libraryHandler.DownloadFile)
+			library.PUT("/items/:id", rateLimitMiddleware(apiLimiter), libraryHandler.UpdateItem)
+			library.DELETE("/items/:id", rateLimitMiddleware(apiLimiter), libraryHandler.DeleteItem)
+			library.GET("/admins", rateLimitMiddleware(apiLimiter), libraryHandler.ListAdmins)
+			library.POST("/admins", rateLimitMiddleware(apiLimiter), libraryHandler.AddAdmin)
+			library.DELETE("/admins/:email", rateLimitMiddleware(apiLimiter), libraryHandler.RemoveAdmin)
+			library.GET("/stats", rateLimitMiddleware(apiLimiter), libraryHandler.GetLibraryStats)
+		}
+
+		// ========== РАСПИСАНИЕ МЕРОПРИЯТИЙ ==========
+		// ========== РАСПИСАНИЕ ЗАДАЧ ==========
+		schedule := protected.Group("/schedule")
+		{
+			schedule.GET("/tasks", rateLimitMiddleware(apiLimiter), scheduleHandler.GetTasks)
+			schedule.POST("/tasks", rateLimitMiddleware(apiLimiter), scheduleHandler.CreateTask)
+			schedule.PUT("/tasks/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.UpdateTask)
+			schedule.PATCH("/tasks/:id/toggle", rateLimitMiddleware(apiLimiter), scheduleHandler.ToggleTaskComplete)
+			schedule.DELETE("/tasks/:id", rateLimitMiddleware(apiLimiter), scheduleHandler.DeleteTask)
+		}
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = cfg.ServerPort
+	}
+
+	log.Printf("Server starting on port %s (ENV: %s)", port, os.Getenv("ENV"))
+	if err := router.Run(":" + port); err != nil {
+		log.Fatal("Failed to start server:", err)
+	}
+}
+
+func rateLimitMiddleware(limiter *rate.Limiter) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !limiter.Allow() {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many requests"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\config\config.go ===
+package config
+
+import (
+	"log"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/joho/godotenv"
+)
+
+type Config struct {
+	// Server
+	ServerPort   string
+	JWTSecret    string
+	JWTExpiresIn time.Duration
+
+	// Database
+	DBHost      string
+	DBPort      int
+	DBUser      string
+	DBPassword  string
+	DBName      string
+	DBSSLMode   string
+	DatabaseURL string
+
+	// Storage
+	UploadPath  string
+	MaxFileSize int64
+
+	// Library Admins
+	LibraryAdmins []string
+}
+
+func Load() (*Config, error) {
+	// Р—Р°РіСЂСѓР¶Р°РµРј .env С„Р°Р№Р»
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using environment variables")
+	}
+
+	// РџР°СЂСЃРёРј СЃРїРёСЃРѕРє Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂРѕРІ
+	adminsStr := getEnv("LIBRARY_ADMINS", "")
+	var admins []string
+	if adminsStr != "" {
+		admins = strings.Split(adminsStr, ",")
+		for i := range admins {
+			admins[i] = strings.TrimSpace(admins[i])
+		}
+	}
+
+	// Р”Р»СЏ Render - РµСЃР»Рё ENV=production, С‚Рѕ РёСЃРїРѕР»СЊР·СѓРµРј SSL
+	dbSSLMode := getEnv("DB_SSLMODE", "disable")
+	if os.Getenv("ENV") == "production" && dbSSLMode == "disable" {
+		dbSSLMode = "require"
+		log.Println("Production mode: forcing SSL mode 'require'")
+	}
+
+	config := &Config{
+		// Server
+		ServerPort:   getEnv("SERVER_PORT", "8080"),
+		JWTSecret:    getEnv("JWT_SECRET", "your-secret-key-change-in-production"),
+		JWTExpiresIn: getEnvAsDuration("JWT_EXPIRES_IN", 24*time.Hour),
+
+		// Database
+		DBHost:      getEnv("DB_HOST", "localhost"),
+		DBPort:      getEnvAsInt("DB_PORT", 5432),
+		DBUser:      getEnv("DB_USER", "postgres"),
+		DBPassword:  getEnv("DB_PASSWORD", "password"),
+		DBName:      getEnv("DB_NAME", "cloud_storage"),
+		DBSSLMode:   dbSSLMode,
+		DatabaseURL: getEnv("DATABASE_URL", ""),
+
+		// Storage
+		UploadPath:  getEnv("UPLOAD_PATH", "./uploads"),
+		MaxFileSize: getEnvAsInt64("MAX_FILE_SIZE", 100*1024*1024),
+
+		// Library Admins
+		LibraryAdmins: admins,
+	}
+
+	// РЎРѕР·РґР°РµРј РґРёСЂРµРєС‚РѕСЂРёСЋ РґР»СЏ Р·Р°РіСЂСѓР·РѕРє РµСЃР»Рё РµС‘ РЅРµС‚
+	if err := os.MkdirAll(config.UploadPath, 0755); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+// Р’СЃРїРѕРјРѕРіР°С‚РµР»СЊРЅС‹Рµ С„СѓРЅРєС†РёРё
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intVal, err := strconv.Atoi(value); err == nil {
+			return intVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvAsInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if intVal, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return intVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvAsDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			return duration
+		}
+	}
+	return defaultValue
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\crypto\encryption.go ===
+// internal/crypto/encryption.go
+package crypto
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"io"
+	"os"
+)
+
+type EncryptionService struct {
+	key []byte
+}
+
+func NewEncryptionService(secret string) *EncryptionService {
+	hash := sha256.Sum256([]byte(secret))
+	return &EncryptionService{key: hash[:]}
+}
+
+// EncryptFile С€РёС„СЂСѓРµС‚ С„Р°Р№Р» РїРµСЂРµРґ СЃРѕС…СЂР°РЅРµРЅРёРµРј
+func (e *EncryptionService) EncryptFile(srcPath, dstPath string) error {
+	input, err := os.ReadFile(srcPath)
+	if err != nil {
+		return err
+	}
+
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, input, nil)
+
+	return os.WriteFile(dstPath, ciphertext, 0644)
+}
+
+// DecryptFile СЂР°СЃС€РёС„СЂРѕРІС‹РІР°РµС‚ С„Р°Р№Р»
+func (e *EncryptionService) DecryptFile(srcPath, dstPath string) error {
+	ciphertext, err := os.ReadFile(srcPath)
+	if err != nil {
+		return err
+	}
+
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return err
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(dstPath, plaintext, 0644)
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\database\postgres.go ===
+package database
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"os"
+
+	_ "github.com/lib/pq"
+
+	"cloud-storage-go/internal/config"
+)
+
+func Connect(cfg *config.Config) (*sql.DB, error) {
+	var connStr string
+
+	if cfg.DatabaseURL != "" {
+		connStr = cfg.DatabaseURL
+	} else {
+		// РћРїСЂРµРґРµР»СЏРµРј sslmode
+		sslmode := cfg.DBSSLMode
+		if sslmode == "" || sslmode == "disable" {
+			// РќР° Render РІСЃРµРіРґР° РёСЃРїРѕР»СЊР·СѓРµРј require
+			if os.Getenv("ENV") == "production" {
+				sslmode = "require"
+				log.Println("Using SSL mode: require (production)")
+			} else {
+				sslmode = "disable"
+			}
+		}
+
+		connStr = fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName, sslmode,
+		)
+	}
+
+	log.Printf("Connecting to database with SSL mode: %s",
+		func() string {
+			if cfg.DBSSLMode != "" {
+				return cfg.DBSSLMode
+			}
+			return "auto"
+		}())
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("error opening database: %v", err)
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("error connecting to database: %v", err)
+	}
+
+	log.Println("Database connected successfully!")
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+
+	return db, nil
+}
+
+func CreateTables(db *sql.DB) error {
+	queries := []string{
+		// РўР°Р±Р»РёС†Р° users
+		`
+		CREATE TABLE IF NOT EXISTS users (
+			id UUID PRIMARY KEY,
+			email VARCHAR(255) UNIQUE NOT NULL,
+			password_hash VARCHAR(255) NOT NULL,
+			first_name VARCHAR(100),
+			last_name VARCHAR(100),
+			avatar_url VARCHAR(512),
+			is_email_verified BOOLEAN DEFAULT FALSE,
+			verification_code VARCHAR(10),
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+		`,
+
+		// РўР°Р±Р»РёС†Р° files СЃ folder_size
+		`
+		CREATE TABLE IF NOT EXISTS files (
+			id UUID PRIMARY KEY,
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name VARCHAR(255) NOT NULL,
+			original_name VARCHAR(255) NOT NULL,
+			path VARCHAR(1024),
+			size BIGINT DEFAULT 0,
+			folder_size BIGINT DEFAULT 0,
+			mime_type VARCHAR(255),
+			is_folder BOOLEAN DEFAULT FALSE,
+			parent_folder_id UUID REFERENCES files(id) ON DELETE CASCADE,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+		`,
+
+		// РРЅРґРµРєСЃС‹ РґР»СЏ files
+		`CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_files_parent_folder ON files(parent_folder_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_files_is_folder ON files(is_folder);`,
+
+		// РўР°Р±Р»РёС†Р° oauth_accounts
+		`
+		CREATE TABLE IF NOT EXISTS oauth_accounts (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			provider VARCHAR(50) NOT NULL,
+			provider_user_id VARCHAR(255) NOT NULL,
+			access_token TEXT,
+			refresh_token TEXT,
+			token_expiry TIMESTAMP WITH TIME ZONE,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(provider, provider_user_id)
+		);
+		`,
+
+		// РРЅРґРµРєСЃС‹ РґР»СЏ oauth_accounts
+		`CREATE INDEX IF NOT EXISTS idx_oauth_user_id ON oauth_accounts(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_oauth_provider ON oauth_accounts(provider, provider_user_id);`,
+
+		// РўР°Р±Р»РёС†Р° library_items
+		`
+		CREATE TABLE IF NOT EXISTS library_items (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			name VARCHAR(255) NOT NULL,
+			description TEXT,
+			mime_type VARCHAR(255),
+			size BIGINT DEFAULT 0,
+			path VARCHAR(1024),
+			is_folder BOOLEAN DEFAULT FALSE,
+			parent_id UUID REFERENCES library_items(id) ON DELETE CASCADE,
+			version INT DEFAULT 1,
+			created_by UUID NOT NULL REFERENCES users(id),
+			updated_by UUID REFERENCES users(id),
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			deleted_at TIMESTAMP WITH TIME ZONE
+		);
+		`,
+
+		// РўР°Р±Р»РёС†Р° library_versions
+		`
+		CREATE TABLE IF NOT EXISTS library_versions (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			item_id UUID NOT NULL REFERENCES library_items(id) ON DELETE CASCADE,
+			version INT NOT NULL,
+			size BIGINT,
+			path VARCHAR(1024),
+			created_by UUID NOT NULL REFERENCES users(id),
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+		`,
+
+		// РўР°Р±Р»РёС†Р° library_admins
+		`
+		CREATE TABLE IF NOT EXISTS library_admins (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			email VARCHAR(255) NOT NULL UNIQUE,
+			user_id UUID REFERENCES users(id),
+			added_by UUID NOT NULL REFERENCES users(id),
+			added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+		`,
+
+		// РўР°Р±Р»РёС†Р° audit_logs
+		`
+		CREATE TABLE IF NOT EXISTS audit_logs (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			user_email VARCHAR(255) NOT NULL,
+			action VARCHAR(50) NOT NULL,
+			entity_type VARCHAR(50) NOT NULL,
+			entity_id UUID,
+			entity_name VARCHAR(255),
+			details TEXT,
+			ip_address VARCHAR(45),
+			user_agent TEXT,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		);
+		`,
+
+		// РРЅРґРµРєСЃС‹ РґР»СЏ Р±РёР±Р»РёРѕС‚РµРєРё
+		`CREATE INDEX IF NOT EXISTS idx_library_items_parent ON library_items(parent_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_library_items_name ON library_items(name);`,
+		`CREATE INDEX IF NOT EXISTS idx_library_items_deleted ON library_items(deleted_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_library_versions_item ON library_versions(item_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_library_admins_email ON library_admins(email);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action);`,
+		`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);`,
+	}
+
+	for _, query := range queries {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("error executing query: %v\nQuery: %s", err, query)
+		}
+	}
+
+	return nil
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\admin_handler.go ===
+package handlers
+
+import (
+	"database/sql"
+	"net/http"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/repository"
+	"cloud-storage-go/internal/services"
+)
+
+type AdminHandler struct {
+	userRepo     *repository.UserRepository
+	auditService *services.AuditService
+	libService   *services.LibraryService
+	db           *sql.DB
+}
+
+func NewAdminHandler(userRepo *repository.UserRepository, auditService *services.AuditService, libService *services.LibraryService, db *sql.DB) *AdminHandler {
+	return &AdminHandler{
+		userRepo:     userRepo,
+		auditService: auditService,
+		libService:   libService,
+		db:           db,
+	}
+}
+
+// GetAllUsers - РїРѕР»СѓС‡РёС‚СЊ РІСЃРµС… РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№
+func (h *AdminHandler) GetAllUsers(c *gin.Context) {
+	adminID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	rows, err := h.db.Query(`
+        SELECT id, email, first_name, last_name, is_email_verified, created_at,
+               COALESCE((SELECT SUM(size) FROM files WHERE user_id = users.id AND is_folder = false), 0) as storage_used
+        FROM users
+        ORDER BY created_at DESC
+    `)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var users []map[string]interface{}
+	for rows.Next() {
+		var id uuid.UUID
+		var email, firstName, lastName string
+		var isVerified bool
+		var createdAt time.Time
+		var storageUsed int64
+
+		rows.Scan(&id, &email, &firstName, &lastName, &isVerified, &createdAt, &storageUsed)
+
+		isAdmin, _ := h.libService.IsAdmin(id)
+
+		users = append(users, map[string]interface{}{
+			"id":            id,
+			"email":         email,
+			"first_name":    firstName,
+			"last_name":     lastName,
+			"is_verified":   isVerified,
+			"is_admin":      isAdmin,
+			"storage_used":  storageUsed,
+			"storage_limit": 100 * 1024 * 1024, // TODO: РёР· РЅР°СЃС‚СЂРѕРµРє
+			"created_at":    createdAt,
+		})
+	}
+
+	c.JSON(http.StatusOK, users)
+}
+
+// ToggleUserBlock - Р±Р»РѕРєРёСЂРѕРІРєР°/СЂР°Р·Р±Р»РѕРєРёСЂРѕРІРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+func (h *AdminHandler) ToggleUserBlock(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	_, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	var req struct {
+		Blocked bool `json:"blocked"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: РґРѕР±Р°РІРёС‚СЊ РїРѕР»Рµ is_blocked РІ С‚Р°Р±Р»РёС†Сѓ users
+	// UPDATE users SET is_blocked = $1 WHERE id = $2
+
+	c.JSON(http.StatusOK, gin.H{"message": "user status updated"})
+}
+
+// GetUserByEmail - РїРѕР»СѓС‡РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ email
+func (h *AdminHandler) GetUserByEmail(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	email := c.Param("email")
+
+	var id uuid.UUID
+	var userEmail, firstName, lastName string
+	var isVerified bool
+	var createdAt time.Time
+	var storageUsed int64
+
+	err := h.db.QueryRow(`
+        SELECT id, email, first_name, last_name, is_email_verified, created_at,
+               COALESCE((SELECT SUM(size) FROM files WHERE user_id = users.id AND is_folder = false), 0) as storage_used
+        FROM users
+        WHERE email = $1
+    `, email).Scan(&id, &userEmail, &firstName, &lastName, &isVerified, &createdAt, &storageUsed)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	isAdminUser, _ := h.libService.IsAdmin(id)
+
+	c.JSON(http.StatusOK, map[string]interface{}{
+		"id":            id,
+		"email":         userEmail,
+		"first_name":    firstName,
+		"last_name":     lastName,
+		"is_verified":   isVerified,
+		"is_admin":      isAdminUser,
+		"storage_used":  storageUsed,
+		"storage_limit": 100 * 1024 * 1024,
+		"created_at":    createdAt,
+	})
+}
+
+// SetUserStorageLimit - СѓСЃС‚Р°РЅРѕРІРёС‚СЊ Р»РёРјРёС‚ С…СЂР°РЅРёР»РёС‰Р° РґР»СЏ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+func (h *AdminHandler) SetUserStorageLimit(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	userID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	var req struct {
+		StorageLimit int64 `json:"storage_limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: РґРѕР±Р°РІРёС‚СЊ РїРѕР»Рµ storage_limit РІ С‚Р°Р±Р»РёС†Сѓ users
+	_ = userID
+	_ = req.StorageLimit
+
+	c.JSON(http.StatusOK, gin.H{"message": "storage limit updated"})
+}
+
+// CleanInactiveUsers - РѕС‡РёСЃС‚РєР° РЅРµР°РєС‚РёРІРЅС‹С… РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№
+func (h *AdminHandler) CleanInactiveUsers(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: СѓРґР°Р»РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№, РЅРµР°РєС‚РёРІРЅС‹С… Р±РѕР»РµРµ X РґРЅРµР№
+	// DELETE FROM users WHERE last_login_at < NOW() - INTERVAL '1 day' * $1 AND is_email_verified = false
+
+	c.JSON(http.StatusOK, gin.H{"deleted_count": 0})
+}
+
+// SetDefaultLimit - СѓСЃС‚Р°РЅРѕРІРёС‚СЊ Р»РёРјРёС‚ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
+func (h *AdminHandler) SetDefaultLimit(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	var req struct {
+		DefaultLimit int64 `json:"default_limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: СЃРѕС…СЂР°РЅРёС‚СЊ РІ РЅР°СЃС‚СЂРѕР№РєРё
+	_ = req.DefaultLimit
+
+	c.JSON(http.StatusOK, gin.H{"message": "default limit updated"})
+}
+
+// SetMaxFileSize - СѓСЃС‚Р°РЅРѕРІРёС‚СЊ РјР°РєСЃРёРјР°Р»СЊРЅС‹Р№ СЂР°Р·РјРµСЂ С„Р°Р№Р»Р°
+func (h *AdminHandler) SetMaxFileSize(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	var req struct {
+		MaxFileSize int64 `json:"max_file_size"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// TODO: СЃРѕС…СЂР°РЅРёС‚СЊ РІ РЅР°СЃС‚СЂРѕР№РєРё
+	_ = req.MaxFileSize
+
+	c.JSON(http.StatusOK, gin.H{"message": "max file size updated"})
+}
+
+// GetAllLogs - РїРѕР»СѓС‡РёС‚СЊ РІСЃРµ Р»РѕРіРё
+func (h *AdminHandler) GetAllLogs(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	logs, _, err := h.auditService.GetLogs(1, 1000)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, logs)
+}
+
+// GetUserLogs - РїРѕР»СѓС‡РёС‚СЊ Р»РѕРіРё РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+func (h *AdminHandler) GetUserLogs(c *gin.Context) {
+	adminID, _ := middleware.GetUserID(c)
+	isAdmin, _ := h.libService.IsAdmin(adminID)
+	if !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	email := c.Param("email")
+
+	rows, err := h.db.Query(`
+        SELECT id, user_id, user_email, action, entity_type, entity_id, entity_name, details, ip_address, user_agent, created_at
+        FROM audit_logs
+        WHERE user_email = $1
+        ORDER BY created_at DESC
+        LIMIT 500
+    `, email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var logs []map[string]interface{}
+	for rows.Next() {
+		var id uuid.UUID
+		var userID uuid.UUID
+		var userEmail, action, entityType string
+		var entityID sql.NullString
+		var entityName, details, ipAddress, userAgent sql.NullString
+		var createdAt time.Time
+
+		rows.Scan(&id, &userID, &userEmail, &action, &entityType, &entityID, &entityName, &details, &ipAddress, &userAgent, &createdAt)
+
+		logs = append(logs, map[string]interface{}{
+			"id":          id,
+			"user_id":     userID,
+			"user_email":  userEmail,
+			"action":      action,
+			"entity_type": entityType,
+			"entity_id":   entityID.String,
+			"entity_name": entityName.String,
+			"details":     details.String,
+			"ip_address":  ipAddress.String,
+			"user_agent":  userAgent.String,
+			"created_at":  createdAt,
+		})
+	}
+
+	c.JSON(http.StatusOK, logs)
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\audit_handler.go ===
+package handlers
+
+import (
+    "net/http"
+    "strconv"
+
+    "github.com/gin-gonic/gin"
+
+    "cloud-storage-go/internal/middleware"
+    "cloud-storage-go/internal/services"
+)
+
+type AuditHandler struct {
+    auditService *services.AuditService
+    libraryService *services.LibraryService
+}
+
+func NewAuditHandler(auditService *services.AuditService, libraryService *services.LibraryService) *AuditHandler {
+    return &AuditHandler{
+        auditService:   auditService,
+        libraryService: libraryService,
+    }
+}
+
+func (h *AuditHandler) GetLogs(c *gin.Context) {
+    userID, exists := middleware.GetUserID(c)
+    if !exists {
+        c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+        return
+    }
+
+    // Проверяем, что пользователь админ
+    isAdmin, err := h.libraryService.IsAdmin(userID)
+    if err != nil || !isAdmin {
+        c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+        return
+    }
+
+    page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+    limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+
+    logs, total, err := h.auditService.GetLogs(page, limit)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "logs":  logs,
+        "total": total,
+        "page":  page,
+        "limit": limit,
+    })
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\auth_handler.go ===
+package handlers
+
+import (
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/services"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+)
+
+type AuthHandler struct {
+	authService *services.AuthService
+}
+
+func NewAuthHandler(authService *services.AuthService) *AuthHandler {
+	return &AuthHandler{
+		authService: authService,
+	}
+}
+
+// Register - С‚РµРїРµСЂСЊ РІРѕР·РІСЂР°С‰Р°РµС‚ RegisterResponse
+func (h *AuthHandler) Register(c *gin.Context) {
+	var req models.UserRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.authService.Register(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+// VerifyEmail - РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email
+func (h *AuthHandler) VerifyEmail(c *gin.Context) {
+	var req models.VerifyEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.authService.VerifyEmail(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// ResendCode - РїРѕРІС‚РѕСЂРЅР°СЏ РѕС‚РїСЂР°РІРєР° РєРѕРґР°
+func (h *AuthHandler) ResendCode(c *gin.Context) {
+	var req models.ResendCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err := h.authService.ResendCode(&req)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Verification code resent successfully"})
+}
+
+// Login - Р±РµР· РёР·РјРµРЅРµРЅРёР№
+func (h *AuthHandler) Login(c *gin.Context) {
+	var req models.UserLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	resp, err := h.authService.Login(&req)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\file_handler.go ===
+package handlers
+
+import (
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/services"
+	"log"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+type FileHandler struct {
+	fileService *services.FileService
+}
+
+func NewFileHandler(fileService *services.FileService) *FileHandler {
+	return &FileHandler{
+		fileService: fileService,
+	}
+}
+
+func (h *FileHandler) UploadFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+
+	var parentFolderID *uuid.UUID
+	if folderIDStr := c.PostForm("folder_id"); folderIDStr != "" && folderIDStr != "null" && folderIDStr != "undefined" {
+		fid, err := uuid.Parse(folderIDStr)
+		if err == nil {
+			parentFolderID = &fid
+			log.Printf("Uploading to folder: %s", fid)
+		}
+	}
+
+	log.Printf("Uploading file: %s, user: %s, parentFolder: %v", file.Filename, userID, parentFolderID)
+
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open file"})
+		return
+	}
+	defer src.Close()
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	resp, err := h.fileService.UploadFile(userID, parentFolderID, file.Filename, src, file.Size, ip, userAgent)
+	if err != nil {
+		log.Printf("Upload error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, resp)
+}
+
+func (h *FileHandler) ListFiles(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	var parentFolderID *uuid.UUID
+	if folderIDStr := c.Query("folder_id"); folderIDStr != "" {
+		fid, err := uuid.Parse(folderIDStr)
+		if err == nil {
+			parentFolderID = &fid
+		}
+	}
+
+	files, total, err := h.fileService.GetUserFiles(userID, parentFolderID, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if files == nil {
+		files = []models.File{}
+	}
+
+	c.JSON(http.StatusOK, models.FileListResponse{
+		Files: files,
+		Total: total,
+		Page:  page,
+		Limit: limit,
+	})
+}
+
+func (h *FileHandler) RenameFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.fileService.RenameFile(userID, fileID, req.Name); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file renamed successfully"})
+}
+
+func (h *FileHandler) GetFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	file, err := h.fileService.GetFileByID(fileID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	if file.UserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	c.JSON(http.StatusOK, file)
+}
+
+func (h *FileHandler) GetStorageStats(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	stats, err := h.fileService.GetUserStorageStats(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+func (h *FileHandler) DownloadFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	file, err := h.fileService.GetFileByID(fileID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	if file.UserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied"})
+		return
+	}
+
+	if file.IsFolder {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot download a folder"})
+		return
+	}
+
+	if file.Path == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "file path is empty"})
+		return
+	}
+
+	c.FileAttachment(file.Path, file.OriginalName)
+}
+
+func (h *FileHandler) DeleteFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	if err := h.fileService.DeleteFile(userID, fileID, ip, userAgent); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file deleted successfully"})
+}
+
+// MoveFile - перемещение файла
+func (h *FileHandler) MoveFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	var req struct {
+		ParentFolderID *uuid.UUID `json:"parent_folder_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.fileService.MoveFile(userID, fileID, req.ParentFolderID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "file moved successfully"})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\folder_handler.go ===
+package handlers
+
+import (
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/services"
+	"log"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+type FolderHandler struct {
+	fileService *services.FileService
+}
+
+func NewFolderHandler(fileService *services.FileService) *FolderHandler {
+	return &FolderHandler{
+		fileService: fileService,
+	}
+}
+
+// MoveFolder - перемещение папки
+func (h *FolderHandler) MoveFolder(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	folderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	var req struct {
+		ParentFolderID *uuid.UUID `json:"parent_folder_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.fileService.MoveFolder(userID, folderID, req.ParentFolderID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "folder moved successfully"})
+}
+func (h *FolderHandler) CreateFolder(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req models.FolderCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	folder, err := h.fileService.CreateFolder(userID, req.Name, req.ParentFolderID, ip, userAgent)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, folder)
+}
+
+func (h *FolderHandler) GetFolderContents(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	folderIDStr := c.Param("id")
+	if folderIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "folder id is required"})
+		return
+	}
+
+	folderID, err := uuid.Parse(folderIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	files, total, err := h.fileService.GetUserFiles(userID, &folderID, page, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.FileListResponse{
+		Files: files,
+		Total: total,
+		Page:  page,
+		Limit: limit,
+	})
+}
+
+func (h *FolderHandler) RenameFolder(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	folderID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	var req struct {
+		Name string `json:"name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.fileService.RenameFolder(userID, folderID, req.Name); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "folder renamed successfully"})
+}
+
+func (h *FolderHandler) DeleteFolder(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	folderIDStr := c.Param("id")
+	if folderIDStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "folder id is required"})
+		return
+	}
+
+	folderID, err := uuid.Parse(folderIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	log.Printf(" Deleting folder %s for user %s", folderID, userID)
+
+	if err := h.fileService.DeleteFolder(userID, folderID, ip, userAgent); err != nil {
+		log.Printf(" DeleteFolder error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "folder deleted successfully"})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\library_handler.go ===
+package handlers
+
+import (
+	"log"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/services"
+)
+
+type LibraryHandler struct {
+	libService *services.LibraryService
+}
+
+func NewLibraryHandler(libService *services.LibraryService) *LibraryHandler {
+	return &LibraryHandler{libService: libService}
+}
+func (h *LibraryHandler) GetLibraryStats(c *gin.Context) {
+	_, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	stats, err := h.libService.GetLibraryStorageStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetItems - РїРѕР»СѓС‡РµРЅРёРµ СЌР»РµРјРµРЅС‚РѕРІ Р±РёР±Р»РёРѕС‚РµРєРё (РґРѕСЃС‚СѓРїРЅРѕ РІСЃРµРј)
+func (h *LibraryHandler) GetItems(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var parentID *uuid.UUID
+	if parentIDStr := c.Query("parent_id"); parentIDStr != "" {
+		pid, err := uuid.Parse(parentIDStr)
+		if err == nil {
+			parentID = &pid
+		}
+	}
+
+	items, err := h.libService.GetItems(userID, parentID)
+	if err != nil {
+		log.Printf("вќЊ Library GetItems error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, items)
+}
+
+// CreateFolder - СЃРѕР·РґР°РЅРёРµ РїР°РїРєРё РІ Р±РёР±Р»РёРѕС‚РµРєРµ (С‚РѕР»СЊРєРѕ Р°РґРјРёРЅ)
+func (h *LibraryHandler) CreateFolder(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		Name     string     `json:"name" binding:"required"`
+		ParentID *uuid.UUID `json:"parent_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	folder, err := h.libService.CreateFolder(userID, req.Name, req.ParentID, ip, userAgent)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, folder)
+}
+
+// UploadFile - Р·Р°РіСЂСѓР·РєР° С„Р°Р№Р»Р° РІ Р±РёР±Р»РёРѕС‚РµРєСѓ (С‚РѕР»СЊРєРѕ Р°РґРјРёРЅ)
+func (h *LibraryHandler) UploadFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+
+	var parentID *uuid.UUID
+	if parentIDStr := c.PostForm("parent_id"); parentIDStr != "" {
+		pid, err := uuid.Parse(parentIDStr)
+		if err == nil {
+			parentID = &pid
+		}
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open file"})
+		return
+	}
+	defer src.Close()
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	item, err := h.libService.UploadFile(userID, parentID, file.Filename, src, file.Size, ip, userAgent)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, item)
+}
+
+// DownloadFile - СЃРєР°С‡РёРІР°РЅРёРµ С„Р°Р№Р»Р° РёР· Р±РёР±Р»РёРѕС‚РµРєРё (РґРѕСЃС‚СѓРїРЅРѕ РІСЃРµРј)
+func (h *LibraryHandler) DownloadFile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		log.Println("вќЊ DownloadFile: user not found in context")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	log.Printf("рџ“Ґ DownloadFile: userID=%s, itemID=%s", userID, c.Param("id"))
+
+	itemID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid item id"})
+		return
+	}
+
+	data, filename, err := h.libService.DownloadFile(userID, itemID, "")
+	if err != nil {
+		log.Printf("вќЊ DownloadFile error: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Disposition", "attachment; filename="+filename)
+	c.Data(http.StatusOK, "application/octet-stream", data)
+}
+
+// UpdateItem - РѕР±РЅРѕРІР»РµРЅРёРµ СЌР»РµРјРµРЅС‚Р° (С‚РѕР»СЊРєРѕ Р°РґРјРёРЅ)
+func (h *LibraryHandler) UpdateItem(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	itemID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid item id"})
+		return
+	}
+
+	var req struct {
+		Name        string `json:"name" binding:"required"`
+		Description string `json:"description"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	err = h.libService.UpdateItem(userID, itemID, req.Name, req.Description)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "item updated successfully"})
+}
+
+// ListAdmins - СЃРїРёСЃРѕРє Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂРѕРІ
+func (h *LibraryHandler) ListAdmins(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј, С‡С‚Рѕ С‚РµРєСѓС‰РёР№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р°РґРјРёРЅ
+	isAdmin, err := h.libService.IsAdmin(userID)
+	if err != nil || !isAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	admins, err := h.libService.ListAdmins()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, admins)
+}
+
+// AddAdmin - РґРѕР±Р°РІР»РµРЅРёРµ Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°
+func (h *LibraryHandler) AddAdmin(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		Email string `json:"email" binding:"required,email"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.libService.AddAdmin(req.Email, userID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "admin added successfully"})
+}
+
+// RemoveAdmin - СѓРґР°Р»РµРЅРёРµ Р°РґРјРёРЅРёСЃС‚СЂР°С‚РѕСЂР°
+func (h *LibraryHandler) RemoveAdmin(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	email := c.Param("email")
+	if email == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "email required"})
+		return
+	}
+
+	if err := h.libService.RemoveAdmin(email, userID); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "admin removed successfully"})
+}
+
+// DeleteItem - СѓРґР°Р»РµРЅРёРµ СЌР»РµРјРµРЅС‚Р° (С‚РѕР»СЊРєРѕ Р°РґРјРёРЅ)
+func (h *LibraryHandler) DeleteItem(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	itemID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid item id"})
+		return
+	}
+
+	ip := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	err = h.libService.DeleteItem(userID, itemID, ip, userAgent)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "item deleted successfully"})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\oauth_handler.go ===
+package handlers
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"log"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/oauth"
+	"cloud-storage-go/internal/services"
+)
+
+type OAuthHandler struct {
+	providers      map[string]oauth.Provider
+	sessionManager *middleware.SessionManager
+	authService    *services.AuthService
+}
+
+func NewOAuthHandler(
+	google, yandex, vk oauth.Provider,
+	sessionManager *middleware.SessionManager,
+	authService *services.AuthService,
+) *OAuthHandler {
+	providers := make(map[string]oauth.Provider)
+	providers[google.Name()] = google
+	providers[yandex.Name()] = yandex
+	providers[vk.Name()] = vk
+
+	return &OAuthHandler{
+		providers:      providers,
+		sessionManager: sessionManager,
+		authService:    authService,
+	}
+}
+
+// generateState СЃРѕР·РґР°РµС‚ СЃР»СѓС‡Р°Р№РЅС‹Р№ state РґР»СЏ Р·Р°С‰РёС‚С‹ РѕС‚ CSRF
+func generateState() (string, error) {
+	b := make([]byte, 32)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
+// Login - РїРµСЂРµРЅР°РїСЂР°РІР»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР° СЃС‚СЂР°РЅРёС†Сѓ РїСЂРѕРІР°Р№РґРµСЂР°
+// Login - РїРµСЂРµРЅР°РїСЂР°РІР»СЏРµС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅР° СЃС‚СЂР°РЅРёС†Сѓ РїСЂРѕРІР°Р№РґРµСЂР°
+func (h *OAuthHandler) Login(c *gin.Context) {
+	provider := c.Param("provider")
+	log.Printf("========== OAuth LOGIN ==========")
+	log.Printf("Provider: %s", provider)
+
+	p, exists := h.providers[provider]
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider"})
+		return
+	}
+
+	// Р“РµРЅРµСЂРёСЂСѓРµРј state
+	state, err := generateState()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state"})
+		return
+	}
+
+	log.Printf("Generated state: %s", state)
+
+	// РџС‹С‚Р°РµРјСЃСЏ СЃРѕС…СЂР°РЅРёС‚СЊ state РІ СЃРµСЃСЃРёСЋ
+	if err := h.sessionManager.SetOAuthState(c, state, provider); err != nil {
+		log.Printf("Warning: failed to save state to session: %v", err)
+	}
+
+	// РџРѕР»СѓС‡Р°РµРј Р±Р°Р·РѕРІС‹Р№ URL Р°РІС‚РѕСЂРёР·Р°С†РёРё
+	authURL := p.GetAuthURL(state)
+
+	// Р’РЎР•Р“Р”Рђ РґРѕР±Р°РІР»СЏРµРј custom_state РІ URL РґР»СЏ РЅР°РґРµР¶РЅРѕСЃС‚Рё
+	// РџСЂРѕРІРµСЂСЏРµРј, РµСЃС‚СЊ Р»Рё СѓР¶Рµ РїР°СЂР°РјРµС‚СЂС‹
+	if authURL != "" {
+		if authURL[len(authURL)-1] == '?' {
+			authURL = authURL + "custom_state=" + state
+		} else {
+			authURL = authURL + "&custom_state=" + state
+		}
+	}
+
+	log.Printf("Redirecting to: %s", authURL)
+	c.Redirect(http.StatusTemporaryRedirect, authURL)
+}
+
+// Callback - РѕР±СЂР°Р±Р°С‚С‹РІР°РµС‚ callback РѕС‚ РїСЂРѕРІР°Р№РґРµСЂР°
+func (h *OAuthHandler) Callback(c *gin.Context) {
+	provider := c.Param("provider")
+
+	log.Printf("========== OAuth CALLBACK ==========")
+	log.Printf("Provider: %s", provider)
+	log.Printf("Full URL: %s", c.Request.URL.String())
+
+	p, exists := h.providers[provider]
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported provider"})
+		return
+	}
+
+	// РџРѕР»СѓС‡Р°РµРј РїР°СЂР°РјРµС‚СЂС‹ РёР· Р·Р°РїСЂРѕСЃР°
+	code := c.Query("code")
+	state := c.Query("state")
+	customState := c.Query("custom_state")
+
+	log.Printf("Code: %s", code[:min(20, len(code))]+"...")
+	log.Printf("State from Google: %s", state)
+	log.Printf("Custom state from URL: %s", customState)
+
+	if code == "" || state == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing code or state"})
+		return
+	}
+
+	// РџС‹С‚Р°РµРјСЃСЏ РїРѕР»СѓС‡РёС‚СЊ state РёР· СЃРµСЃСЃРёРё
+	savedState, savedProvider, ok := h.sessionManager.GetOAuthState(c)
+
+	// Р•СЃР»Рё РІ СЃРµСЃСЃРёРё РЅРµС‚, РёСЃРїРѕР»СЊР·СѓРµРј customState РёР· URL
+	var finalState string
+	var finalProvider string
+
+	if ok {
+		finalState = savedState
+		finalProvider = savedProvider
+		log.Printf("Using state from session: %s", finalState)
+	} else if customState != "" {
+		finalState = customState
+		finalProvider = provider
+		log.Printf("Using state from URL: %s", finalState)
+	} else {
+		log.Printf("вќЊ No state found in session or URL")
+		c.JSON(http.StatusForbidden, gin.H{"error": "no oauth state found"})
+		return
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј state
+	if finalState != state {
+		log.Printf("вќЊ State mismatch: saved=%s, received=%s", finalState, state)
+		c.JSON(http.StatusForbidden, gin.H{"error": "invalid state parameter"})
+		return
+	}
+
+	if finalProvider != provider {
+		log.Printf("вќЊ Provider mismatch: saved=%s, received=%s", finalProvider, provider)
+		c.JSON(http.StatusForbidden, gin.H{"error": "provider mismatch"})
+		return
+	}
+
+	log.Printf("вњ… State verified successfully")
+
+	// РћР±РјРµРЅРёРІР°РµРј РєРѕРґ РЅР° С‚РѕРєРµРЅ
+	token, err := p.ExchangeCode(c.Request.Context(), code)
+	if err != nil {
+		log.Printf("вќЊ Failed to exchange code: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to exchange code"})
+		return
+	}
+	log.Printf("вњ… Token obtained")
+
+	// РџРѕР»СѓС‡Р°РµРј РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ
+	userInfo, err := p.GetUserInfo(c.Request.Context(), token)
+	if err != nil {
+		log.Printf("вќЊ Failed to get user info: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get user info"})
+		return
+	}
+	log.Printf("вњ… User info: email=%s, name=%s", userInfo.Email, userInfo.FullName)
+
+	// РђСѓС‚РµРЅС‚РёС„РёС†РёСЂСѓРµРј РёР»Рё СЃРѕР·РґР°РµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+	authResponse, err := h.authService.OAuthLogin(c.Request.Context(), userInfo, token)
+	if err != nil {
+		log.Printf("вќЊ OAuth login failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	log.Printf("вњ… User authenticated: %s", authResponse.User.Email)
+
+	// РЎРѕС…СЂР°РЅСЏРµРј user_id РІ СЃРµСЃСЃРёРё
+	if err := h.sessionManager.SetUserID(c, authResponse.User.ID); err != nil {
+		log.Printf("вљ пёЏ Failed to save user session: %v", err)
+	}
+
+	// РџРµСЂРµРЅР°РїСЂР°РІР»СЏРµРј РЅР° РґР°С€Р±РѕСЂРґ СЃ С‚РѕРєРµРЅРѕРј
+	redirectURL := fmt.Sprintf("/dashboard?token=%s", authResponse.Token)
+	log.Printf("Redirecting to: %s", redirectURL)
+	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\schedule_handler.go ===
+package handlers
+
+import (
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/repository"
+)
+
+type ScheduleHandler struct {
+	scheduleRepo *repository.ScheduleRepository
+	userRepo     *repository.UserRepository
+}
+
+func NewScheduleHandler(scheduleRepo *repository.ScheduleRepository, userRepo *repository.UserRepository) *ScheduleHandler {
+	return &ScheduleHandler{
+		scheduleRepo: scheduleRepo,
+		userRepo:     userRepo,
+	}
+}
+
+func (h *ScheduleHandler) checkIsAdmin(c *gin.Context) bool {
+	userIDStr, exists := c.Get("user_id")
+	if !exists {
+		return false
+	}
+
+	userID, err := uuid.Parse(userIDStr.(string))
+	if err != nil {
+		return false
+	}
+
+	user, err := h.userRepo.GetByID(userID)
+	if err != nil {
+		return false
+	}
+
+	var isAdmin bool
+	query := `SELECT EXISTS(SELECT 1 FROM library_admins WHERE email = $1)`
+	h.scheduleRepo.DB().QueryRow(query, user.Email).Scan(&isAdmin)
+	return isAdmin
+}
+
+// GET /api/schedule/tasks
+func (h *ScheduleHandler) GetTasks(c *gin.Context) {
+	tasks, err := h.scheduleRepo.GetAllTasks()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+// POST /api/schedule/tasks
+func (h *ScheduleHandler) CreateTask(c *gin.Context) {
+	if !h.checkIsAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	userIDStr, _ := c.Get("user_id")
+	userID, err := uuid.Parse(userIDStr.(string))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	var task models.ScheduleTask
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if task.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
+		return
+	}
+
+	task.CreatedBy = userID.String()
+	if err := h.scheduleRepo.CreateTask(&task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// PUT /api/schedule/tasks/:id
+func (h *ScheduleHandler) UpdateTask(c *gin.Context) {
+	if !h.checkIsAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	id := c.Param("id")
+
+	var task models.ScheduleTask
+	if err := c.ShouldBindJSON(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	task.ID = id
+	if err := h.scheduleRepo.UpdateTask(&task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// PATCH /api/schedule/tasks/:id/toggle
+func (h *ScheduleHandler) ToggleTaskComplete(c *gin.Context) {
+	if !h.checkIsAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	id := c.Param("id")
+
+	var req struct {
+		Completed bool `json:"completed"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := h.scheduleRepo.ToggleTaskComplete(id, req.Completed); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "updated"})
+}
+
+// DELETE /api/schedule/tasks/:id
+func (h *ScheduleHandler) DeleteTask(c *gin.Context) {
+	if !h.checkIsAdmin(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "admin access required"})
+		return
+	}
+
+	id := c.Param("id")
+
+	if err := h.scheduleRepo.DeleteTask(id); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "deleted"})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\handlers\user_handler.go ===
+package handlers
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"cloud-storage-go/internal/middleware"
+	"cloud-storage-go/internal/repository"
+)
+
+type UserHandler struct {
+	userRepo   *repository.UserRepository
+	uploadPath string
+}
+
+func NewUserHandler(userRepo *repository.UserRepository, uploadPath string) *UserHandler {
+	return &UserHandler{
+		userRepo:   userRepo,
+		uploadPath: uploadPath,
+	}
+}
+
+func (h *UserHandler) UpdateProfile(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user, err := h.userRepo.GetByID(userID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+
+	if req.FirstName != "" {
+		user.FirstName = req.FirstName
+	}
+	if req.LastName != "" {
+		user.LastName = req.LastName
+	}
+	user.UpdatedAt = time.Now()
+
+	if err := h.userRepo.Update(user); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, user)
+}
+
+func (h *UserHandler) UploadAvatar(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	file, err := c.FormFile("avatar")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "avatar file required"})
+		return
+	}
+
+	// Создаём папку пользователя для аватаров
+	userAvatarPath := filepath.Join(h.uploadPath, "avatars", userID.String())
+	if err := os.MkdirAll(userAvatarPath, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	ext := filepath.Ext(file.Filename)
+	filename := "avatar" + ext
+	avatarPath := filepath.Join(userAvatarPath, filename)
+	if err := c.SaveUploadedFile(file, avatarPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	avatarURL := "/uploads/avatars/" + userID.String() + "/" + filename
+	if err := h.userRepo.UpdateAvatar(userID, avatarURL); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"avatar_url": avatarURL})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\middleware\auth_middleware.go ===
+package middleware
+
+import (
+	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/utils"
+)
+
+func AuthMiddleware(jwtUtil *utils.JWTUtil) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// РЎРЅР°С‡Р°Р»Р° РїСЂРѕРІРµСЂСЏРµРј Р·Р°РіРѕР»РѕРІРѕРє Authorization
+		authHeader := c.GetHeader("Authorization")
+		tokenString := ""
+
+		if authHeader != "" {
+			parts := strings.Split(authHeader, " ")
+			if len(parts) == 2 && parts[0] == "Bearer" {
+				tokenString = parts[1]
+			}
+		}
+
+		// Р•СЃР»Рё РІ Р·Р°РіРѕР»РѕРІРєРµ РЅРµС‚, РїСЂРѕРІРµСЂСЏРµРј URL РїР°СЂР°РјРµС‚СЂ token
+		if tokenString == "" {
+			tokenString = c.Query("token")
+		}
+
+		// Р•СЃР»Рё РІСЃС‘ РµС‰С‘ РЅРµС‚, РІРѕР·РІСЂР°С‰Р°РµРј РѕС€РёР±РєСѓ
+		if tokenString == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "authorization header required"})
+			c.Abort()
+			return
+		}
+
+		token, err := jwtUtil.ValidateToken(tokenString)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			c.Abort()
+			return
+		}
+
+		// ... РѕСЃС‚Р°Р»СЊРЅРѕР№ РєРѕРґ Р±РµР· РёР·РјРµРЅРµРЅРёР№
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token claims type"})
+			c.Abort()
+			return
+		}
+
+		if !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			c.Abort()
+			return
+		}
+
+		userIDInterface, exists := claims["user_id"]
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "user_id not found in token"})
+			c.Abort()
+			return
+		}
+
+		userIDStr, ok := userIDInterface.(string)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user id format in token"})
+			c.Abort()
+			return
+		}
+
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid user id format"})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", userID)
+		c.Next()
+	}
+}
+
+func GetUserID(c *gin.Context) (uuid.UUID, bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		return uuid.UUID{}, false
+	}
+
+	id, ok := userID.(uuid.UUID)
+	return id, ok
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\middleware\cors_middleware.go ===
+package middleware
+
+import (
+	"time"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+)
+
+func CORSConfig() gin.HandlerFunc {
+	return cors.New(cors.Config{
+		AllowOrigins:     []string{"*"}, // Р’ РїСЂРѕРґР°РєС€РµРЅРµ Р·Р°РјРµРЅРё РЅР° РєРѕРЅРєСЂРµС‚РЅС‹Рµ РґРѕРјРµРЅС‹
+		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-Requested-With"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	})
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\middleware\security.go ===
+package middleware
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+
+	"github.com/gin-gonic/gin"
+)
+
+// generateNonce СЃРѕР·РґР°РµС‚ СЃР»СѓС‡Р°Р№РЅС‹Р№ nonce РґР»СЏ CSP
+func generateNonce() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// SecurityHeadersMiddleware РґРѕР±Р°РІР»СЏРµС‚ Р·Р°РіРѕР»РѕРІРєРё Р±РµР·РѕРїР°СЃРЅРѕСЃС‚Рё
+func SecurityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Р’СЂРµРјРµРЅРЅРѕ РѕС‚РєР»СЋС‡Р°РµРј CSP РґР»СЏ РѕС‚Р»Р°РґРєРё
+		// c.Header("Content-Security-Policy", "...")
+
+		// РћСЃС‚Р°РІР»СЏРµРј РѕСЃС‚Р°Р»СЊРЅС‹Рµ Р·Р°РіРѕР»РѕРІРєРё
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		c.Next()
+	}
+}
+
+// SanitizeInputMiddleware РѕС‡РёС‰Р°РµС‚ РІС…РѕРґРЅС‹Рµ РґР°РЅРЅС‹Рµ
+func SanitizeInputMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// РџСЂРѕРІРµСЂСЏРµРј Content-Type
+		contentType := c.GetHeader("Content-Type")
+		if contentType != "" && contentType != "application/json" &&
+			contentType != "multipart/form-data" &&
+			contentType != "application/x-www-form-urlencoded" {
+			c.JSON(415, gin.H{"error": "Unsupported Media Type"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\middleware\session.go ===
+package middleware
+
+import (
+	"encoding/gob"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/gorilla/sessions"
+)
+
+// SessionKeys - РєР»СЋС‡Рё РґР»СЏ С…СЂР°РЅРµРЅРёСЏ РґР°РЅРЅС‹С… РІ СЃРµСЃСЃРёРё
+var SessionKeys = struct {
+	UserID   string
+	State    string
+	Provider string
+	Redirect string
+}{
+	UserID:   "user_id",
+	State:    "oauth_state",
+	Provider: "oauth_provider",
+	Redirect: "redirect_url",
+}
+
+// SessionConfig - РєРѕРЅС„РёРіСѓСЂР°С†РёСЏ СЃРµСЃСЃРёР№
+type SessionConfig struct {
+	SecretKey string
+	MaxAge    int  // СЃРµРєСѓРЅРґС‹
+	Secure    bool // true РґР»СЏ HTTPS
+	HttpOnly  bool
+	SameSite  http.SameSite
+}
+
+// DefaultSessionConfig - РєРѕРЅС„РёРіСѓСЂР°С†РёСЏ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
+func DefaultSessionConfig() *SessionConfig {
+	return &SessionConfig{
+		SecretKey: getEnv("SESSION_SECRET", "your-session-secret-key-change-me"),
+		MaxAge:    86400 * 7,
+		Secure:    false, // Р’Р°Р¶РЅРѕ: false РґР»СЏ HTTP
+		HttpOnly:  false, // Р’СЂРµРјРµРЅРЅРѕ false РґР»СЏ РѕС‚Р»Р°РґРєРё
+		SameSite:  http.SameSiteLaxMode,
+	}
+}
+
+// SessionManager - СѓРїСЂР°РІР»РµРЅРёРµ СЃРµСЃСЃРёСЏРјРё
+type SessionManager struct {
+	store  *sessions.CookieStore
+	name   string
+	config *SessionConfig
+}
+
+// NewSessionManager - СЃРѕР·РґР°РµС‚ РЅРѕРІС‹Р№ РјРµРЅРµРґР¶РµСЂ СЃРµСЃСЃРёР№
+func NewSessionManager(config *SessionConfig) *SessionManager {
+	if config == nil {
+		config = DefaultSessionConfig()
+	}
+
+	// Р РµРіРёСЃС‚СЂРёСЂСѓРµРј С‚РёРїС‹ РґР»СЏ СЃРµСЂРёР°Р»РёР·Р°С†РёРё
+	gob.Register(uuid.UUID{})
+	gob.Register(time.Time{})
+	gob.Register(map[string]interface{}{})
+
+	store := sessions.NewCookieStore([]byte(config.SecretKey))
+
+	// РќР°СЃС‚СЂРѕР№РєРё С…СЂР°РЅРёР»РёС‰Р°
+	store.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   config.MaxAge,
+		Secure:   config.Secure,
+		HttpOnly: config.HttpOnly,
+		SameSite: config.SameSite,
+	}
+
+	return &SessionManager{
+		store:  store,
+		name:   "cloud-storage-session",
+		config: config,
+	}
+}
+
+// GetSession - РїРѕР»СѓС‡Р°РµС‚ СЃРµСЃСЃРёСЋ РёР· Р·Р°РїСЂРѕСЃР°
+func (sm *SessionManager) GetSession(c *gin.Context) (*sessions.Session, error) {
+	return sm.store.Get(c.Request, sm.name)
+}
+
+// GetSessionWithDefaults - РїРѕР»СѓС‡Р°РµС‚ СЃРµСЃСЃРёСЋ РёР»Рё СЃРѕР·РґР°РµС‚ РЅРѕРІСѓСЋ СЃ РґРµС„РѕР»С‚РЅС‹РјРё Р·РЅР°С‡РµРЅРёСЏРјРё
+func (sm *SessionManager) GetSessionWithDefaults(c *gin.Context) *sessions.Session {
+	session, _ := sm.store.Get(c.Request, sm.name)
+
+	// РЈСЃС‚Р°РЅР°РІР»РёРІР°РµРј Р·РЅР°С‡РµРЅРёСЏ РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ РµСЃР»Рё РёС… РЅРµС‚
+	if session.Values["created_at"] == nil {
+		session.Values["created_at"] = time.Now()
+	}
+
+	return session
+}
+
+// SaveSession - СЃРѕС…СЂР°РЅСЏРµС‚ СЃРµСЃСЃРёСЋ
+func (sm *SessionManager) SaveSession(c *gin.Context, session *sessions.Session) error {
+	return session.Save(c.Request, c.Writer)
+}
+
+// ClearSession - РѕС‡РёС‰Р°РµС‚ СЃРµСЃСЃРёСЋ
+func (sm *SessionManager) ClearSession(c *gin.Context) error {
+	session, _ := sm.store.Get(c.Request, sm.name)
+	session.Options.MaxAge = -1 // СѓРґР°Р»РёС‚СЊ
+	return session.Save(c.Request, c.Writer)
+}
+
+// SetUserID - СЃРѕС…СЂР°РЅСЏРµС‚ ID РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РІ СЃРµСЃСЃРёРё
+func (sm *SessionManager) SetUserID(c *gin.Context, userID uuid.UUID) error {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		session, _ = sm.store.New(c.Request, sm.name)
+	}
+
+	session.Values[SessionKeys.UserID] = userID
+	return sm.SaveSession(c, session)
+}
+
+// GetUserID - РїРѕР»СѓС‡Р°РµС‚ ID РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР· СЃРµСЃСЃРёРё
+func (sm *SessionManager) GetUserID(c *gin.Context) (uuid.UUID, bool) {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		return uuid.UUID{}, false
+	}
+
+	userID, ok := session.Values[SessionKeys.UserID].(uuid.UUID)
+	if !ok {
+		return uuid.UUID{}, false
+	}
+
+	return userID, true
+}
+
+// SetOAuthState - СЃРѕС…СЂР°РЅСЏРµС‚ state РґР»СЏ OAuth
+func (sm *SessionManager) SetOAuthState(c *gin.Context, state, provider string) error {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		log.Printf("SetOAuthState: error getting session: %v, creating new", err)
+		session, _ = sm.store.New(c.Request, sm.name)
+	}
+
+	session.Values[SessionKeys.State] = state
+	session.Values[SessionKeys.Provider] = provider
+
+	log.Printf("SetOAuthState: saving state=%s, provider=%s", state, provider)
+
+	err = sm.SaveSession(c, session)
+	if err != nil {
+		log.Printf("SetOAuthState: error saving session: %v", err)
+		return err
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј, СѓСЃС‚Р°РЅРѕРІРёР»Р°СЃСЊ Р»Рё РєСѓРєР°
+	cookieHeader := c.Writer.Header().Get("Set-Cookie")
+	log.Printf("SetOAuthState: Set-Cookie header: %s", cookieHeader)
+
+	return nil
+}
+
+// GetOAuthState - РїРѕР»СѓС‡Р°РµС‚ Рё СѓРґР°Р»СЏРµС‚ state РґР»СЏ OAuth
+// GetOAuthState - РїРѕР»СѓС‡Р°РµС‚ Рё СѓРґР°Р»СЏРµС‚ state РґР»СЏ OAuth
+func (sm *SessionManager) GetOAuthState(c *gin.Context) (string, string, bool) {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		log.Printf("GetOAuthState: error getting session: %v", err)
+		return "", "", false
+	}
+
+	state, stateOk := session.Values[SessionKeys.State].(string)
+	provider, providerOk := session.Values[SessionKeys.Provider].(string)
+
+	log.Printf("GetOAuthState: session values: state=%s (ok=%v), provider=%s (ok=%v)",
+		state, stateOk, provider, providerOk)
+
+	if !stateOk || !providerOk {
+		log.Printf("GetOAuthState: missing state or provider in session")
+		return "", "", false
+	}
+
+	// РЈРґР°Р»СЏРµРј РёСЃРїРѕР»СЊР·РѕРІР°РЅРЅС‹Р№ state
+	delete(session.Values, SessionKeys.State)
+	delete(session.Values, SessionKeys.Provider)
+	sm.SaveSession(c, session)
+
+	return state, provider, true
+}
+
+// SetRedirectURL - СЃРѕС…СЂР°РЅСЏРµС‚ URL РґР»СЏ СЂРµРґРёСЂРµРєС‚Р° РїРѕСЃР»Рµ OAuth
+func (sm *SessionManager) SetRedirectURL(c *gin.Context, url string) error {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		session, _ = sm.store.New(c.Request, sm.name)
+	}
+
+	session.Values[SessionKeys.Redirect] = url
+	return sm.SaveSession(c, session)
+}
+
+// GetRedirectURL - РїРѕР»СѓС‡Р°РµС‚ Рё СѓРґР°Р»СЏРµС‚ URL РґР»СЏ СЂРµРґРёСЂРµРєС‚Р°
+func (sm *SessionManager) GetRedirectURL(c *gin.Context) (string, bool) {
+	session, err := sm.GetSession(c)
+	if err != nil {
+		return "", false
+	}
+
+	url, _ := session.Values[SessionKeys.Redirect].(string)
+	delete(session.Values, SessionKeys.Redirect)
+	sm.SaveSession(c, session)
+
+	return url, url != ""
+}
+
+// SessionMiddleware - middleware РґР»СЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРѕР№ Р·Р°РіСЂСѓР·РєРё СЃРµСЃСЃРёРё
+func (sm *SessionManager) SessionMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Р—Р°РіСЂСѓР¶Р°РµРј РёР»Рё СЃРѕР·РґР°РµРј СЃРµСЃСЃРёСЋ
+		session := sm.GetSessionWithDefaults(c)
+
+		// РЎРѕС…СЂР°РЅСЏРµРј СЃРµСЃСЃРёСЋ РІ РєРѕРЅС‚РµРєСЃС‚ РґР»СЏ РґР°Р»СЊРЅРµР№С€РµРіРѕ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ
+		c.Set("session", session)
+		c.Set("session_manager", sm)
+
+		c.Next()
+	}
+}
+
+// AuthRequired - middleware РґР»СЏ РїСЂРѕРІРµСЂРєРё Р°СѓС‚РµРЅС‚РёС„РёРєР°С†РёРё
+func (sm *SessionManager) AuthRequired() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, ok := sm.GetUserID(c)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "authentication required",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", userID)
+		c.Next()
+	}
+}
+
+// Helper functions
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\models\file.go ===
+package models
+
+import (
+    "time"
+
+    "github.com/google/uuid"
+)
+
+type File struct {
+    ID             uuid.UUID  `json:"id" db:"id"`
+    UserID         uuid.UUID  `json:"user_id" db:"user_id"`
+    Name           string     `json:"name" db:"name"`
+    OriginalName   string     `json:"original_name" db:"original_name"`
+    Path           string     `json:"path" db:"path"`
+    Size           int64      `json:"size" db:"size"`
+    FolderSize     int64      `json:"folder_size,omitempty" db:"folder_size"`
+    MimeType       string     `json:"mime_type" db:"mime_type"`
+    IsFolder       bool       `json:"is_folder" db:"is_folder"`
+    ParentFolderID *uuid.UUID `json:"parent_folder_id,omitempty" db:"parent_folder_id"`
+    CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+    UpdatedAt      time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+type FileUploadResponse struct {
+    ID        uuid.UUID `json:"id"`
+    Name      string    `json:"name"`
+    Size      int64     `json:"size"`
+    MimeType  string    `json:"mime_type"`
+    CreatedAt time.Time `json:"created_at"`
+}
+
+type FolderCreateRequest struct {
+    Name           string     `json:"name" binding:"required"`
+    ParentFolderID *uuid.UUID `json:"parent_folder_id"`
+}
+
+type FileListResponse struct {
+    Files []File `json:"files"`
+    Total int64  `json:"total"`
+    Page  int    `json:"page"`
+    Limit int    `json:"limit"`
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\models\schedule.go ===
+package models
+
+import "time"
+
+type ScheduleTask struct {
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	Description string    `json:"description"`
+	DueDate     string    `json:"due_date"`
+	DueTime     string    `json:"due_time"`
+	Priority    string    `json:"priority"` // high, medium, low
+	Completed   bool      `json:"completed"`
+	CreatedBy   string    `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\models\user.go ===
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// User - РѕСЃРЅРѕРІРЅР°СЏ РјРѕРґРµР»СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+type User struct {
+	ID               uuid.UUID `json:"id" db:"id"`
+	Email            string    `json:"email" db:"email"`
+	PasswordHash     string    `json:"-" db:"password_hash"`
+	FirstName        string    `json:"first_name" db:"first_name"`
+	LastName         string    `json:"last_name" db:"last_name"`
+	AvatarURL        string    `json:"avatar_url,omitempty" db:"avatar_url"`
+	IsEmailVerified  bool      `json:"is_email_verified" db:"is_email_verified"`
+	VerificationCode string    `json:"-" db:"verification_code"`
+	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// OAuthAccount - РјРѕРґРµР»СЊ РґР»СЏ OAuth Р°РєРєР°СѓРЅС‚РѕРІ
+type OAuthAccount struct {
+	ID             uuid.UUID  `json:"id" db:"id"`
+	UserID         uuid.UUID  `json:"user_id" db:"user_id"`
+	Provider       string     `json:"provider" db:"provider"`
+	ProviderUserID string     `json:"provider_user_id" db:"provider_user_id"`
+	AccessToken    string     `json:"-" db:"access_token"`
+	RefreshToken   *string    `json:"-" db:"refresh_token"`
+	TokenExpiry    *time.Time `json:"-" db:"token_expiry"`
+	CreatedAt      time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// UserRegisterRequest - Р·Р°РїСЂРѕСЃ РЅР° СЂРµРіРёСЃС‚СЂР°С†РёСЋ
+type UserRegisterRequest struct {
+	Email     string `json:"email" binding:"required,email"`
+	Password  string `json:"password" binding:"required,min=6"`
+	FirstName string `json:"first_name" binding:"required"`
+	LastName  string `json:"last_name" binding:"required"`
+}
+
+// UserLoginRequest - Р·Р°РїСЂРѕСЃ РЅР° РІС…РѕРґ
+type UserLoginRequest struct {
+	Email    string `json:"email" binding:"required,email"`
+	Password string `json:"password" binding:"required"`
+}
+
+// AuthResponse - РѕС‚РІРµС‚ СЃ С‚РѕРєРµРЅРѕРј
+type AuthResponse struct {
+	Token string `json:"token"`
+	User  *User  `json:"user"`
+}
+
+// RegisterResponse - РѕС‚РІРµС‚ РїРѕСЃР»Рµ СЂРµРіРёСЃС‚СЂР°С†РёРё
+type RegisterResponse struct {
+	Message string `json:"message"`
+	Email   string `json:"email"`
+}
+
+// VerifyEmailRequest - Р·Р°РїСЂРѕСЃ РЅР° РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email
+type VerifyEmailRequest struct {
+	Email string `json:"email" binding:"required,email"`
+	Code  string `json:"code" binding:"required,len=6"`
+}
+
+// ResendCodeRequest - Р·Р°РїСЂРѕСЃ РЅР° РїРѕРІС‚РѕСЂРЅСѓСЋ РѕС‚РїСЂР°РІРєСѓ РєРѕРґР°
+type ResendCodeRequest struct {
+	Email string `json:"email" binding:"required,email"`
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\oauth\google.go ===
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+)
+
+type GoogleProvider struct {
+	*BaseProvider
+}
+
+func NewGoogleProvider(clientID, clientSecret, redirectURL string) *GoogleProvider {
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Scopes: []string{
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+		},
+		Endpoint: google.Endpoint,
+	}
+
+	return &GoogleProvider{
+		BaseProvider: &BaseProvider{
+			config: config,
+			name:   "google",
+		},
+	}
+}
+
+func (p *GoogleProvider) GetUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
+	client := p.config.Client(ctx, token)
+
+	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user info: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		ID            string `json:"id"`
+		Email         string `json:"email"`
+		VerifiedEmail bool   `json:"verified_email"`
+		Name          string `json:"name"`
+		GivenName     string `json:"given_name"`
+		FamilyName    string `json:"family_name"`
+		Picture       string `json:"picture"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to decode user info: %v", err)
+	}
+
+	return &UserInfo{
+		Provider:   p.Name(),
+		ProviderID: data.ID,
+		Email:      data.Email,
+		FirstName:  data.GivenName,
+		LastName:   data.FamilyName,
+		FullName:   data.Name,
+		AvatarURL:  data.Picture,
+	}, nil
+}
+
+func (p *GoogleProvider) GetAuthURL(state string) string {
+	return p.config.AuthCodeURL(state)
+}
+
+func (p *GoogleProvider) ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error) {
+	return p.config.Exchange(ctx, code)
+}
+
+func (p *GoogleProvider) Config() *oauth2.Config {
+	return p.config
+}
+
+func (p *GoogleProvider) Name() string {
+	return p.name
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\oauth\provider.go ===
+package oauth
+
+import (
+	"context"
+
+	"golang.org/x/oauth2"
+)
+
+// UserInfo - РёРЅС„РѕСЂРјР°С†РёСЏ Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ РѕС‚ РїСЂРѕРІР°Р№РґРµСЂР°
+type UserInfo struct {
+	Provider   string
+	ProviderID string
+	Email      string
+	FirstName  string
+	LastName   string
+	FullName   string
+	AvatarURL  string
+}
+
+// Provider - РёРЅС‚РµСЂС„РµР№СЃ OAuth РїСЂРѕРІР°Р№РґРµСЂР°
+type Provider interface {
+	// РќР°Р·РІР°РЅРёРµ РїСЂРѕРІР°Р№РґРµСЂР° (google, yandex, vk)
+	Name() string
+
+	// РџРѕР»СѓС‡РµРЅРёРµ URL РґР»СЏ СЂРµРґРёСЂРµРєС‚Р° РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+	GetAuthURL(state string) string
+
+	// РћР±РјРµРЅ РєРѕРґР° РЅР° С‚РѕРєРµРЅ
+	ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error)
+
+	// РџРѕР»СѓС‡РµРЅРёРµ РёРЅС„РѕСЂРјР°С†РёРё Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ
+	GetUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error)
+
+	// РќР°СЃС‚СЂРѕР№РєРё РїСЂРѕРІР°Р№РґРµСЂР°
+	Config() *oauth2.Config
+}
+
+// BaseProvider - Р±Р°Р·РѕРІР°СЏ СЃС‚СЂСѓРєС‚СѓСЂР° РґР»СЏ РІСЃРµС… РїСЂРѕРІР°Р№РґРµСЂРѕРІ
+type BaseProvider struct {
+	config *oauth2.Config
+	name   string
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\oauth\vk.go ===
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+
+	"golang.org/x/oauth2"
+)
+
+// VKEndpoint - СЌРЅРґРїРѕРёРЅС‚С‹ VK OAuth
+var VKEndpoint = oauth2.Endpoint{
+	AuthURL:  "https://oauth.vk.com/authorize",
+	TokenURL: "https://oauth.vk.com/access_token",
+}
+
+type VKProvider struct {
+	*BaseProvider
+	apiVersion string
+}
+
+func NewVKProvider(clientID, clientSecret, redirectURL string) *VKProvider {
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Scopes:       []string{"email", "photos"},
+		Endpoint:     VKEndpoint,
+	}
+
+	return &VKProvider{
+		BaseProvider: &BaseProvider{
+			config: config,
+			name:   "vk",
+		},
+		apiVersion: "5.131",
+	}
+}
+
+// VK РІРѕР·РІСЂР°С‰Р°РµС‚ С‚РѕРєРµРЅ РІРјРµСЃС‚Рµ СЃ email РІ РѕС‚РІРµС‚Рµ
+func (p *VKProvider) ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error) {
+	// VK РґРѕР±Р°РІР»СЏРµС‚ email РІ РѕС‚РІРµС‚ РїСЂРё РѕР±РјРµРЅРµ РєРѕРґР°
+	token, err := p.config.Exchange(ctx, code)
+	if err != nil {
+		return nil, err
+	}
+	return token, nil
+}
+
+func (p *VKProvider) GetUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
+	// РР·РІР»РµРєР°РµРј email РёР· С‚РѕРєРµРЅР° (VK РІРѕР·РІСЂР°С‰Р°РµС‚ email РІ extra)
+	email, _ := token.Extra("email").(string)
+
+	client := p.config.Client(ctx, token)
+
+	// Р—Р°РїСЂР°С€РёРІР°РµРј РёРЅС„РѕСЂРјР°С†РёСЋ Рѕ РїРѕР»СЊР·РѕРІР°С‚РµР»Рµ
+	params := url.Values{}
+	params.Set("access_token", token.AccessToken)
+	params.Set("v", p.apiVersion)
+	params.Set("fields", "first_name,last_name,photo_max_orig")
+
+	apiURL := "https://api.vk.com/method/users.get?" + params.Encode()
+
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user info: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		Response []struct {
+			ID        int    `json:"id"`
+			FirstName string `json:"first_name"`
+			LastName  string `json:"last_name"`
+			PhotoMax  string `json:"photo_max_orig"`
+		} `json:"response"`
+		Error *struct {
+			ErrorCode int    `json:"error_code"`
+			ErrorMsg  string `json:"error_msg"`
+		} `json:"error"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to decode user info: %v", err)
+	}
+
+	if data.Error != nil {
+		return nil, fmt.Errorf("VK API error: %s", data.Error.ErrorMsg)
+	}
+
+	if len(data.Response) == 0 {
+		return nil, fmt.Errorf("no user data returned")
+	}
+
+	user := data.Response[0]
+
+	return &UserInfo{
+		Provider:   p.Name(),
+		ProviderID: fmt.Sprintf("%d", user.ID),
+		Email:      email,
+		FirstName:  user.FirstName,
+		LastName:   user.LastName,
+		FullName:   fmt.Sprintf("%s %s", user.FirstName, user.LastName),
+		AvatarURL:  user.PhotoMax,
+	}, nil
+}
+
+func (p *VKProvider) GetAuthURL(state string) string {
+	// VK С‚СЂРµР±СѓРµС‚ РґРѕРїРѕР»РЅРёС‚РµР»СЊРЅС‹Рµ РїР°СЂР°РјРµС‚СЂС‹
+	u, _ := url.Parse(p.config.AuthCodeURL(state))
+	q := u.Query()
+	q.Set("display", "page")
+	q.Set("revoke", "1")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (p *VKProvider) Config() *oauth2.Config {
+	return p.config
+}
+
+func (p *VKProvider) Name() string {
+	return p.name
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\oauth\yandex.go ===
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"golang.org/x/oauth2"
+)
+
+// YandexEndpoint - СЌРЅРґРїРѕРёРЅС‚С‹ Yandex OAuth
+var YandexEndpoint = oauth2.Endpoint{
+	AuthURL:  "https://oauth.yandex.ru/authorize",
+	TokenURL: "https://oauth.yandex.ru/token",
+}
+
+type YandexProvider struct {
+	*BaseProvider
+}
+
+func NewYandexProvider(clientID, clientSecret, redirectURL string) *YandexProvider {
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Scopes:       []string{"login:email", "login:info", "login:avatar"},
+		Endpoint:     YandexEndpoint,
+	}
+
+	return &YandexProvider{
+		BaseProvider: &BaseProvider{
+			config: config,
+			name:   "yandex",
+		},
+	}
+}
+
+func (p *YandexProvider) GetUserInfo(ctx context.Context, token *oauth2.Token) (*UserInfo, error) {
+	client := p.config.Client(ctx, token)
+
+	resp, err := client.Get("https://login.yandex.ru/info?format=json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user info: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var data struct {
+		ID            string `json:"id"`
+		Login         string `json:"login"`
+		Email         string `json:"default_email"`
+		RealName      string `json:"real_name"`
+		FirstName     string `json:"first_name"`
+		LastName      string `json:"last_name"`
+		DisplayName   string `json:"display_name"`
+		DefaultAvatar string `json:"default_avatar_id"`
+		IsAvatarEmpty bool   `json:"is_avatar_empty"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to decode user info: %v", err)
+	}
+
+	avatarURL := ""
+	if !data.IsAvatarEmpty {
+		avatarURL = fmt.Sprintf("https://avatars.yandex.net/get-yapic/%s/islands-200", data.DefaultAvatar)
+	}
+
+	return &UserInfo{
+		Provider:   p.Name(),
+		ProviderID: data.ID,
+		Email:      data.Email,
+		FirstName:  data.FirstName,
+		LastName:   data.LastName,
+		FullName:   data.RealName,
+		AvatarURL:  avatarURL,
+	}, nil
+}
+
+func (p *YandexProvider) GetAuthURL(state string) string {
+	return p.config.AuthCodeURL(state)
+}
+
+func (p *YandexProvider) ExchangeCode(ctx context.Context, code string) (*oauth2.Token, error) {
+	return p.config.Exchange(ctx, code)
+}
+
+func (p *YandexProvider) Config() *oauth2.Config {
+	return p.config
+}
+
+func (p *YandexProvider) Name() string {
+	return p.name
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\audit_repository.go ===
+package repository
+
+import (
+    "database/sql"
+    "time"
+
+    "github.com/google/uuid"
+)
+
+type AuditLog struct {
+    ID         uuid.UUID `json:"id"`
+    UserID     uuid.UUID `json:"user_id"`
+    UserEmail  string    `json:"user_email"`
+    Action     string    `json:"action"`
+    EntityType string    `json:"entity_type"`
+    EntityID   *uuid.UUID `json:"entity_id,omitempty"`
+    EntityName string    `json:"entity_name,omitempty"`
+    Details    string    `json:"details,omitempty"`
+    IPAddress  string    `json:"ip_address"`
+    UserAgent  string    `json:"user_agent"`
+    CreatedAt  time.Time `json:"created_at"`
+}
+
+type AuditRepository struct {
+    db *sql.DB
+}
+
+func NewAuditRepository(db *sql.DB) *AuditRepository {
+    return &AuditRepository{db: db}
+}
+
+func (r *AuditRepository) Create(log *AuditLog) error {
+    query := `
+        INSERT INTO audit_logs (id, user_id, user_email, action, entity_type, entity_id, entity_name, details, ip_address, user_agent, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `
+    _, err := r.db.Exec(query,
+        log.ID, log.UserID, log.UserEmail, log.Action,
+        log.EntityType, log.EntityID, log.EntityName, log.Details,
+        log.IPAddress, log.UserAgent, log.CreatedAt,
+    )
+    return err
+}
+
+func (r *AuditRepository) GetLogs(limit, offset int) ([]AuditLog, int64, error) {
+    var total int64
+    r.db.QueryRow("SELECT COUNT(*) FROM audit_logs").Scan(&total)
+
+    rows, err := r.db.Query(`
+        SELECT id, user_id, user_email, action, entity_type, entity_id, entity_name, details, ip_address, user_agent, created_at
+        FROM audit_logs
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+    `, limit, offset)
+    if err != nil {
+        return nil, 0, err
+    }
+    defer rows.Close()
+
+    var logs []AuditLog
+    for rows.Next() {
+        var l AuditLog
+        err := rows.Scan(&l.ID, &l.UserID, &l.UserEmail, &l.Action, &l.EntityType,
+            &l.EntityID, &l.EntityName, &l.Details, &l.IPAddress, &l.UserAgent, &l.CreatedAt)
+        if err != nil {
+            return nil, 0, err
+        }
+        logs = append(logs, l)
+    }
+    return logs, total, nil
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\file_repository.go ===
+package repository
+
+import (
+	"cloud-storage-go/internal/models"
+	"database/sql"
+	"errors"
+	"strconv"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type FileRepository struct {
+	db *sql.DB
+}
+
+func NewFileRepository(db *sql.DB) *FileRepository {
+	return &FileRepository{db: db}
+}
+
+// GetUserStorageStats - получает статистику пользователя (оптимизированный запрос)
+func (r *FileRepository) GetUserStorageStats(userID uuid.UUID) (totalSize int64, fileCount int, folderCount int, err error) {
+	query := `
+		SELECT 
+			COALESCE(SUM(CASE WHEN is_folder = false THEN size ELSE 0 END), 0) as total_size,
+			COUNT(CASE WHEN is_folder = false THEN 1 END) as file_count,
+			COUNT(CASE WHEN is_folder = true THEN 1 END) as folder_count
+		FROM files
+		WHERE user_id = $1
+	`
+	err = r.db.QueryRow(query, userID).Scan(&totalSize, &fileCount, &folderCount)
+	return
+}
+
+// GetUserFolders - получает все папки пользователя
+func (r *FileRepository) GetUserFolders(userID uuid.UUID) ([]models.File, error) {
+	query := `
+		SELECT id, user_id, name, original_name, path, size, folder_size, mime_type, 
+			   is_folder, parent_folder_id, created_at, updated_at
+		FROM files
+		WHERE user_id = $1 AND is_folder = true
+		ORDER BY created_at ASC
+	`
+
+	rows, err := r.db.Query(query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []models.File
+	for rows.Next() {
+		var folder models.File
+		err := rows.Scan(
+			&folder.ID, &folder.UserID, &folder.Name, &folder.OriginalName,
+			&folder.Path, &folder.Size, &folder.FolderSize, &folder.MimeType, &folder.IsFolder,
+			&folder.ParentFolderID, &folder.CreatedAt, &folder.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, folder)
+	}
+
+	return folders, nil
+}
+func (r *FileRepository) GetFolderByID(folderID uuid.UUID) (*models.File, error) {
+	file, err := r.GetByID(folderID)
+	if err != nil {
+		return nil, err
+	}
+	if !file.IsFolder {
+		return nil, errors.New("not a folder")
+	}
+	return file, nil
+}
+
+// GetFolderChildren - получает все дочерние элементы папки
+func (r *FileRepository) GetFolderChildren(folderID uuid.UUID) ([]models.File, error) {
+	query := `
+		SELECT id, user_id, name, original_name, path, size, folder_size, mime_type, 
+			   is_folder, parent_folder_id, created_at, updated_at
+		FROM files
+		WHERE parent_folder_id = $1
+		ORDER BY is_folder DESC, name ASC
+	`
+
+	rows, err := r.db.Query(query, folderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []models.File
+	for rows.Next() {
+		var file models.File
+		err := rows.Scan(
+			&file.ID, &file.UserID, &file.Name, &file.OriginalName,
+			&file.Path, &file.Size, &file.FolderSize, &file.MimeType, &file.IsFolder,
+			&file.ParentFolderID, &file.CreatedAt, &file.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+// UpdateFolderSizeRecursive - обновляет размер папки рекурсивно (оптимизированная версия)
+func (r *FileRepository) UpdateFolderSizeRecursive(folderID uuid.UUID) error {
+	// Рекурсивный CTE для подсчета размера всех файлов в папке и подпапках
+	query := `
+		WITH RECURSIVE folder_tree AS (
+			-- Начальный уровень: прямая папка
+			SELECT id, is_folder, size, parent_folder_id, 1 as level
+			FROM files
+			WHERE id = $1
+			
+			UNION ALL
+			
+			-- Рекурсивно добавляем все дочерние элементы
+			SELECT f.id, f.is_folder, f.size, f.parent_folder_id, ft.level + 1
+			FROM files f
+			INNER JOIN folder_tree ft ON f.parent_folder_id = ft.id
+		)
+		SELECT COALESCE(SUM(CASE WHEN is_folder = false THEN size ELSE 0 END), 0) as total_size
+		FROM folder_tree
+		WHERE id != $1  -- Исключаем саму папку из суммы
+	`
+
+	var folderSize int64
+	err := r.db.QueryRow(query, folderID).Scan(&folderSize)
+	if err != nil {
+		return err
+	}
+
+	// Обновляем размер папки
+	_, err = r.db.Exec(`
+		UPDATE files 
+		SET folder_size = $1, updated_at = $2 
+		WHERE id = $3
+	`, folderSize, time.Now(), folderID)
+
+	if err != nil {
+		return err
+	}
+
+	// Обновляем родительскую папку (если есть)
+	var parentID *uuid.UUID
+	err = r.db.QueryRow("SELECT parent_folder_id FROM files WHERE id = $1", folderID).Scan(&parentID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	if parentID != nil {
+		return r.UpdateFolderSizeRecursive(*parentID)
+	}
+
+	return nil
+}
+
+// GetAllUserFiles - получает все файлы пользователя
+func (r *FileRepository) GetAllUserFiles(userID uuid.UUID) ([]models.File, error) {
+	query := `
+		SELECT id, user_id, name, original_name, path, size, folder_size, mime_type, 
+		is_folder, parent_folder_id, created_at, updated_at
+		FROM files
+		WHERE user_id = $1
+		ORDER BY is_folder DESC, name ASC
+	`
+
+	rows, err := r.db.Query(query, userID)
+	if err != nil {
+		return []models.File{}, err
+	}
+	defer rows.Close()
+
+	var files []models.File
+	for rows.Next() {
+		var file models.File
+		err := rows.Scan(
+			&file.ID, &file.UserID, &file.Name, &file.OriginalName,
+			&file.Path, &file.Size, &file.FolderSize, &file.MimeType, &file.IsFolder,
+			&file.ParentFolderID, &file.CreatedAt, &file.UpdatedAt,
+		)
+		if err != nil {
+			return []models.File{}, err
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+// UpdateFolderSize - обновляет размер папки
+func (r *FileRepository) UpdateFolderSize(folderID uuid.UUID, size int64) error {
+	query := `UPDATE files SET folder_size = $1, updated_at = $2 WHERE id = $3`
+	_, err := r.db.Exec(query, size, time.Now(), folderID)
+	return err
+}
+
+// GetFolderSize - получает размер папки
+func (r *FileRepository) GetFolderSize(folderID uuid.UUID) (int64, error) {
+	var size int64
+	query := `SELECT COALESCE(folder_size, 0) FROM files WHERE id = $1`
+	err := r.db.QueryRow(query, folderID).Scan(&size)
+	return size, err
+}
+
+// Update - обновляет файл/папку
+func (r *FileRepository) Update(file *models.File) error {
+	query := `
+		UPDATE files 
+		SET name = $1, original_name = $2, path = $3, size = $4, folder_size = $5,
+			mime_type = $6, is_folder = $7, parent_folder_id = $8, updated_at = $9
+		WHERE id = $10
+	`
+	_, err := r.db.Exec(query,
+		file.Name, file.OriginalName, file.Path, file.Size, file.FolderSize,
+		file.MimeType, file.IsFolder, file.ParentFolderID, file.UpdatedAt,
+		file.ID,
+	)
+	return err
+}
+
+// Create - создает файл/папку
+func (r *FileRepository) Create(file *models.File) error {
+	query := `
+		INSERT INTO files (id, user_id, name, original_name, path, size, folder_size, 
+							mime_type, is_folder, parent_folder_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	`
+	_, err := r.db.Exec(query, file.ID, file.UserID, file.Name, file.OriginalName,
+		file.Path, file.Size, file.FolderSize, file.MimeType, file.IsFolder, file.ParentFolderID,
+		file.CreatedAt, file.UpdatedAt)
+	return err
+}
+
+// GetByUserID - получает файлы пользователя с пагинацией
+func (r *FileRepository) GetByUserID(userID uuid.UUID, parentFolderID *uuid.UUID, page, limit int) ([]models.File, int64, error) {
+	var files []models.File
+	var total int64
+
+	offset := (page - 1) * limit
+
+	countQuery := `SELECT COUNT(*) FROM files WHERE user_id = $1`
+	countArgs := []interface{}{userID}
+
+	if parentFolderID != nil {
+		countQuery += ` AND parent_folder_id = $2`
+		countArgs = append(countArgs, *parentFolderID)
+	} else {
+		countQuery += ` AND parent_folder_id IS NULL`
+	}
+
+	err := r.db.QueryRow(countQuery, countArgs...).Scan(&total)
+	if err != nil {
+		return []models.File{}, 0, err
+	}
+
+	query := `
+		SELECT id, user_id, name, original_name, path, size, folder_size, mime_type, 
+			   is_folder, parent_folder_id, created_at, updated_at
+		FROM files
+		WHERE user_id = $1
+	`
+	queryArgs := []interface{}{userID}
+	argPos := 2
+
+	if parentFolderID != nil {
+		query += ` AND parent_folder_id = $` + strconv.Itoa(argPos)
+		queryArgs = append(queryArgs, *parentFolderID)
+		argPos++
+	} else {
+		query += ` AND parent_folder_id IS NULL`
+	}
+
+	query += ` ORDER BY is_folder DESC, name ASC LIMIT $` + strconv.Itoa(argPos) + ` OFFSET $` + strconv.Itoa(argPos+1)
+	queryArgs = append(queryArgs, limit, offset)
+
+	rows, err := r.db.Query(query, queryArgs...)
+	if err != nil {
+		return []models.File{}, 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var file models.File
+		err := rows.Scan(
+			&file.ID, &file.UserID, &file.Name, &file.OriginalName,
+			&file.Path, &file.Size, &file.FolderSize, &file.MimeType, &file.IsFolder,
+			&file.ParentFolderID, &file.CreatedAt, &file.UpdatedAt,
+		)
+		if err != nil {
+			return []models.File{}, 0, err
+		}
+		files = append(files, file)
+	}
+
+	if files == nil {
+		files = []models.File{}
+	}
+
+	return files, total, nil
+}
+
+// GetByID - получает файл/папку по ID
+func (r *FileRepository) GetByID(id uuid.UUID) (*models.File, error) {
+	file := &models.File{}
+	query := `
+		SELECT id, user_id, name, original_name, path, size, folder_size, mime_type,
+			   is_folder, parent_folder_id, created_at, updated_at
+		FROM files WHERE id = $1
+	`
+
+	err := r.db.QueryRow(query, id).Scan(
+		&file.ID, &file.UserID, &file.Name, &file.OriginalName,
+		&file.Path, &file.Size, &file.FolderSize, &file.MimeType, &file.IsFolder,
+		&file.ParentFolderID, &file.CreatedAt, &file.UpdatedAt,
+	)
+
+	return file, err
+}
+
+// Delete - удаляет файл/папку
+func (r *FileRepository) Delete(id uuid.UUID) error {
+	query := `DELETE FROM files WHERE id = $1`
+	_, err := r.db.Exec(query, id)
+	return err
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\library_repository.go ===
+package repository
+
+import (
+	"database/sql"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type LibraryItem struct {
+	ID          uuid.UUID      `json:"id"`
+	Name        string         `json:"name"`
+	Description sql.NullString `json:"description,omitempty"`
+	MimeType    string         `json:"mime_type"`
+	Size        int64          `json:"size"`
+	Path        sql.NullString `json:"-"`
+	IsFolder    bool           `json:"is_folder"`
+	ParentID    *uuid.UUID     `json:"parent_id,omitempty"`
+	Version     int            `json:"version"`
+	CreatedBy   uuid.UUID      `json:"created_by"`
+	UpdatedBy   sql.NullString `json:"updated_by,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   *time.Time     `json:"deleted_at,omitempty"`
+}
+
+type LibraryAdmin struct {
+	ID      uuid.UUID  `json:"id"`
+	Email   string     `json:"email"`
+	UserID  *uuid.UUID `json:"user_id"`
+	AddedBy uuid.UUID  `json:"added_by"`
+	AddedAt time.Time  `json:"added_at"`
+}
+
+type LibraryRepository struct {
+	db *sql.DB
+}
+
+func NewLibraryRepository(db *sql.DB) *LibraryRepository {
+	return &LibraryRepository{db: db}
+}
+
+func (r *LibraryRepository) IsAdmin(userID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM library_admins la 
+			JOIN users u ON u.email = la.email 
+			WHERE u.id = $1
+		)`, userID).Scan(&exists)
+	return exists, err
+}
+
+func (r *LibraryRepository) GetItems(parentID *uuid.UUID) ([]LibraryItem, error) {
+	var rows *sql.Rows
+	var err error
+
+	if parentID == nil {
+		query := `
+			SELECT id, name, description, mime_type, size, path, is_folder, parent_id, version,
+				   created_by, updated_by, created_at, updated_at, deleted_at
+			FROM library_items
+			WHERE parent_id IS NULL
+			AND deleted_at IS NULL
+			ORDER BY is_folder DESC, name ASC
+		`
+		rows, err = r.db.Query(query)
+	} else {
+		query := `
+			SELECT id, name, description, mime_type, size, path, is_folder, parent_id, version,
+				   created_by, updated_by, created_at, updated_at, deleted_at
+			FROM library_items
+			WHERE parent_id = $1
+			AND deleted_at IS NULL
+			ORDER BY is_folder DESC, name ASC
+		`
+		rows, err = r.db.Query(query, *parentID)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []LibraryItem
+	for rows.Next() {
+		var it LibraryItem
+		var updatedBy sql.NullString
+		var description sql.NullString
+		var path sql.NullString
+
+		err := rows.Scan(
+			&it.ID, &it.Name, &description,
+			&it.MimeType, &it.Size, &path,
+			&it.IsFolder, &it.ParentID, &it.Version,
+			&it.CreatedBy, &updatedBy,
+			&it.CreatedAt, &it.UpdatedAt, &it.DeletedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		it.Description = description
+		it.Path = path
+		it.UpdatedBy = updatedBy
+		items = append(items, it)
+	}
+	return items, nil
+}
+
+func (r *LibraryRepository) GetItem(id uuid.UUID) (*LibraryItem, error) {
+	var it LibraryItem
+	var updatedBy sql.NullString
+	var description sql.NullString
+	var path sql.NullString
+
+	query := `
+		SELECT id, name, description, mime_type, size, path, is_folder, parent_id, version,
+			   created_by, updated_by, created_at, updated_at, deleted_at
+		FROM library_items
+		WHERE id = $1 AND deleted_at IS NULL
+	`
+	err := r.db.QueryRow(query, id).Scan(
+		&it.ID, &it.Name, &description,
+		&it.MimeType, &it.Size, &path,
+		&it.IsFolder, &it.ParentID, &it.Version,
+		&it.CreatedBy, &updatedBy,
+		&it.CreatedAt, &it.UpdatedAt, &it.DeletedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	it.Description = description
+	it.Path = path
+	it.UpdatedBy = updatedBy
+	return &it, nil
+}
+
+// InitAdminsFromConfig - инициализирует администраторов из конфига
+func (r *LibraryRepository) InitAdminsFromConfig(adminEmails []string, addedBy uuid.UUID) error {
+	for _, email := range adminEmails {
+		if email == "" {
+			continue
+		}
+
+		// Проверяем, существует ли пользователь с таким email
+		var userID *uuid.UUID
+		err := r.db.QueryRow("SELECT id FROM users WHERE email = $1", email).Scan(&userID)
+		if err != nil && err != sql.ErrNoRows {
+			log.Printf("Warning: user not found for email %s", email)
+		}
+
+		// Добавляем в администраторы (или обновляем)
+		_, err = r.db.Exec(`
+			INSERT INTO library_admins (id, email, user_id, added_by)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (email) DO UPDATE SET
+				user_id = EXCLUDED.user_id,
+				added_by = EXCLUDED.added_by
+		`, uuid.New(), email, userID, addedBy)
+
+		if err != nil {
+			log.Printf("Warning: failed to add admin %s: %v", email, err)
+		}
+	}
+	return nil
+}
+func (r *LibraryRepository) GetFolderSize(folderID uuid.UUID) (int64, error) {
+	var size int64
+	query := `SELECT COALESCE(size, 0) FROM library_items WHERE id = $1 AND is_folder = true`
+	err := r.db.QueryRow(query, folderID).Scan(&size)
+	return size, err
+}
+
+// UpdateFolderSize - обновляет размер папки
+func (r *LibraryRepository) UpdateFolderSize(folderID uuid.UUID, size int64) error {
+	query := `
+        UPDATE library_items 
+        SET size = $1, updated_at = $2 
+        WHERE id = $3 AND is_folder = true
+    `
+	_, err := r.db.Exec(query, size, time.Now(), folderID)
+	return err
+}
+
+// GetLibraryStorageStats - получает статистику всей библиотеки (только не удаленные)
+func (r *LibraryRepository) GetLibraryStorageStats() (totalSize int64, fileCount int, folderCount int, err error) {
+	query := `
+        SELECT 
+            COALESCE(SUM(CASE WHEN is_folder = false THEN size ELSE 0 END), 0) as total_size,
+            COUNT(CASE WHEN is_folder = false THEN 1 END) as file_count,
+            COUNT(CASE WHEN is_folder = true THEN 1 END) as folder_count
+        FROM library_items
+        WHERE deleted_at IS NULL
+    `
+
+	err = r.db.QueryRow(query).Scan(&totalSize, &fileCount, &folderCount)
+	if err != nil {
+		log.Printf("Error getting library stats: %v", err)
+	}
+	return
+}
+func (r *LibraryRepository) CreateItem(item *LibraryItem) error {
+	query := `
+		INSERT INTO library_items (id, name, description, mime_type, size, path, is_folder, parent_id, version, created_by, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`
+	_, err := r.db.Exec(query,
+		item.ID, item.Name, item.Description,
+		item.MimeType, item.Size, item.Path,
+		item.IsFolder, item.ParentID, item.Version,
+		item.CreatedBy, item.UpdatedBy,
+	)
+	return err
+}
+
+func (r *LibraryRepository) UpdateItem(item *LibraryItem) error {
+	query := `
+		UPDATE library_items
+		SET name = $1, description = $2, updated_by = $3, updated_at = $4, version = version + 1
+		WHERE id = $5
+	`
+	_, err := r.db.Exec(query,
+		item.Name, item.Description,
+		item.UpdatedBy, time.Now(),
+		item.ID,
+	)
+	return err
+}
+
+func (r *LibraryRepository) DeleteItem(id uuid.UUID) error {
+	query := `UPDATE library_items SET deleted_at = $1 WHERE id = $2`
+	_, err := r.db.Exec(query, time.Now(), id)
+	return err
+}
+
+// ListAdmins - список администраторов
+func (r *LibraryRepository) ListAdmins() ([]LibraryAdmin, error) {
+	rows, err := r.db.Query(`
+        SELECT id, email, user_id, added_by, added_at 
+        FROM library_admins 
+        ORDER BY added_at
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var admins []LibraryAdmin
+	for rows.Next() {
+		var a LibraryAdmin
+		err := rows.Scan(&a.ID, &a.Email, &a.UserID, &a.AddedBy, &a.AddedAt)
+		if err != nil {
+			return nil, err
+		}
+		admins = append(admins, a)
+	}
+	return admins, nil
+}
+
+// AddAdmin - добавление администратора
+func (r *LibraryRepository) AddAdmin(email string, addedBy uuid.UUID) error {
+	var userID *uuid.UUID
+	err := r.db.QueryRow("SELECT id FROM users WHERE email = $1", email).Scan(&userID)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	query := `
+        INSERT INTO library_admins (id, email, user_id, added_by)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (email) DO NOTHING
+    `
+	_, err = r.db.Exec(query, uuid.New(), email, userID, addedBy)
+	return err
+}
+
+// RemoveAdmin - удаление администратора
+func (r *LibraryRepository) RemoveAdmin(email string) error {
+	_, err := r.db.Exec("DELETE FROM library_admins WHERE email = $1", email)
+	return err
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\oauth_repository.go ===
+package repository
+
+import (
+	"database/sql"
+	"errors"
+	"time"
+
+	"cloud-storage-go/internal/models"
+
+	"github.com/google/uuid"
+)
+
+type OAuthRepository struct {
+	db *sql.DB
+}
+
+func NewOAuthRepository(db *sql.DB) *OAuthRepository {
+	return &OAuthRepository{db: db}
+}
+
+func (r *OAuthRepository) Create(account *models.OAuthAccount) error {
+	query := `
+        INSERT INTO oauth_accounts (
+            id, user_id, provider, provider_user_id,
+            access_token, refresh_token, token_expiry,
+            created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `
+
+	_, err := r.db.Exec(query,
+		uuid.New(), account.UserID, account.Provider, account.ProviderUserID,
+		account.AccessToken, account.RefreshToken, account.TokenExpiry,
+		time.Now(), time.Now(),
+	)
+	return err
+}
+
+func (r *OAuthRepository) Update(account *models.OAuthAccount) error {
+	query := `
+        UPDATE oauth_accounts 
+        SET access_token = $1, refresh_token = $2, token_expiry = $3, updated_at = $4
+        WHERE id = $5
+    `
+
+	_, err := r.db.Exec(query,
+		account.AccessToken, account.RefreshToken, account.TokenExpiry,
+		time.Now(), account.ID,
+	)
+	return err
+}
+
+func (r *OAuthRepository) FindByProvider(provider, providerUserID string) (*models.OAuthAccount, error) {
+	account := &models.OAuthAccount{}
+	query := `
+        SELECT id, user_id, provider, provider_user_id,
+            access_token, refresh_token, token_expiry,
+            created_at, updated_at
+        FROM oauth_accounts
+        WHERE provider = $1 AND provider_user_id = $2
+    `
+
+	err := r.db.QueryRow(query, provider, providerUserID).Scan(
+		&account.ID, &account.UserID, &account.Provider, &account.ProviderUserID,
+		&account.AccessToken, &account.RefreshToken, &account.TokenExpiry,
+		&account.CreatedAt, &account.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("account not found")
+	}
+	return account, err
+}
+
+func (r *OAuthRepository) FindByUserIDAndProvider(userID uuid.UUID, provider string) (*models.OAuthAccount, error) {
+	account := &models.OAuthAccount{}
+	query := `
+        SELECT id, user_id, provider, provider_user_id,
+            access_token, refresh_token, token_expiry,
+            created_at, updated_at
+        FROM oauth_accounts
+        WHERE user_id = $1 AND provider = $2
+    `
+
+	err := r.db.QueryRow(query, userID, provider).Scan(
+		&account.ID, &account.UserID, &account.Provider, &account.ProviderUserID,
+		&account.AccessToken, &account.RefreshToken, &account.TokenExpiry,
+		&account.CreatedAt, &account.UpdatedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("account not found")
+	}
+	return account, err
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\schedule_repository.go ===
+package repository
+
+import (
+	"database/sql"
+	"time"
+
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/models"
+)
+
+type ScheduleRepository struct {
+	db *sql.DB
+}
+
+func NewScheduleRepository(db *sql.DB) *ScheduleRepository {
+	return &ScheduleRepository{db: db}
+}
+
+func (r *ScheduleRepository) DB() *sql.DB {
+	return r.db
+}
+
+// Task methods
+func (r *ScheduleRepository) CreateTask(task *models.ScheduleTask) error {
+	task.ID = uuid.New().String()
+	task.CreatedAt = time.Now()
+	task.UpdatedAt = time.Now()
+	task.Completed = false
+
+	query := `INSERT INTO schedule_tasks (id, title, description, due_date, due_time, priority, completed, created_by, created_at, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+	_, err := r.db.Exec(query, task.ID, task.Title, task.Description, task.DueDate,
+		task.DueTime, task.Priority, task.Completed, task.CreatedBy, task.CreatedAt, task.UpdatedAt)
+	return err
+}
+
+func (r *ScheduleRepository) GetAllTasks() ([]models.ScheduleTask, error) {
+	query := `SELECT id, title, description, due_date, due_time, priority, completed, created_by, created_at, updated_at 
+              FROM schedule_tasks ORDER BY completed, due_date, due_time`
+	rows, err := r.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []models.ScheduleTask
+	for rows.Next() {
+		var t models.ScheduleTask
+		err := rows.Scan(&t.ID, &t.Title, &t.Description, &t.DueDate, &t.DueTime,
+			&t.Priority, &t.Completed, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, t)
+	}
+	return tasks, nil
+}
+
+func (r *ScheduleRepository) UpdateTask(task *models.ScheduleTask) error {
+	task.UpdatedAt = time.Now()
+	query := `UPDATE schedule_tasks SET title=$1, description=$2, due_date=$3, due_time=$4, 
+              priority=$5, updated_at=$6 WHERE id=$7`
+	_, err := r.db.Exec(query, task.Title, task.Description, task.DueDate, task.DueTime,
+		task.Priority, task.UpdatedAt, task.ID)
+	return err
+}
+
+func (r *ScheduleRepository) ToggleTaskComplete(id string, completed bool) error {
+	query := `UPDATE schedule_tasks SET completed=$1, updated_at=$2 WHERE id=$3`
+	_, err := r.db.Exec(query, completed, time.Now(), id)
+	return err
+}
+
+func (r *ScheduleRepository) DeleteTask(id string) error {
+	query := `DELETE FROM schedule_tasks WHERE id=$1`
+	_, err := r.db.Exec(query, id)
+	return err
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\repository\user_repository.go ===
+package repository
+
+import (
+	"cloud-storage-go/internal/models"
+	"database/sql"
+	"errors"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type UserRepository struct {
+	db *sql.DB
+}
+
+func NewUserRepository(db *sql.DB) *UserRepository {
+	return &UserRepository{db: db}
+}
+
+// Create - СЃРѕР·РґР°РЅРёРµ РЅРѕРІРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ СЃ РїРѕР»СЏРјРё РІРµСЂРёС„РёРєР°С†РёРё
+func (r *UserRepository) Create(user *models.User) error {
+	query := `
+        INSERT INTO users (
+            id, email, password_hash, first_name, last_name, 
+            is_email_verified, verification_code, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `
+	_, err := r.db.Exec(query,
+		user.ID, user.Email, user.PasswordHash,
+		user.FirstName, user.LastName,
+		user.IsEmailVerified, user.VerificationCode,
+		user.CreatedAt, user.UpdatedAt,
+	)
+	return err
+}
+
+// GetByEmail - РїРѕР»СѓС‡РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ email (СЃ РЅРѕРІС‹РјРё РїРѕР»СЏРјРё)
+func (r *UserRepository) GetByEmail(email string) (*models.User, error) {
+	log.Printf("Repository: Looking for user with email: %s", email)
+
+	user := &models.User{}
+	query := `SELECT id, email, password_hash, first_name, last_name, created_at, updated_at 
+              FROM users WHERE email = $1`
+
+	err := r.db.QueryRow(query, email).Scan(
+		&user.ID, &user.Email, &user.PasswordHash,
+		&user.FirstName, &user.LastName, &user.CreatedAt, &user.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("Repository: No user found with email: %s", email)
+			return nil, errors.New("user not found")
+		}
+		log.Printf("Repository: Database error: %v", err)
+		return nil, err
+	}
+
+	log.Printf("Repository: User found: %s", email)
+	return user, nil
+}
+func (r *UserRepository) UpdateAvatar(userID uuid.UUID, avatarURL string) error {
+	query := `
+        UPDATE users 
+        SET avatar_url = $1, updated_at = $2
+        WHERE id = $3
+    `
+	_, err := r.db.Exec(query, avatarURL, time.Now(), userID)
+	return err
+}
+
+// GetByID - РїРѕР»СѓС‡РµРЅРёРµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ ID (СЃ РЅРѕРІС‹РјРё РїРѕР»СЏРјРё)
+func (r *UserRepository) GetByID(id uuid.UUID) (*models.User, error) {
+	user := &models.User{}
+	query := `
+        SELECT 
+            id, email, password_hash, first_name, last_name,
+            is_email_verified, verification_code, created_at, updated_at
+        FROM users 
+        WHERE id = $1
+    `
+
+	err := r.db.QueryRow(query, id).Scan(
+		&user.ID, &user.Email, &user.PasswordHash,
+		&user.FirstName, &user.LastName,
+		&user.IsEmailVerified, &user.VerificationCode,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+
+	return user, err
+}
+
+// Update - РїРѕР»РЅРѕРµ РѕР±РЅРѕРІР»РµРЅРёРµ РґР°РЅРЅС‹С… РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+func (r *UserRepository) Update(user *models.User) error {
+	query := `
+        UPDATE users 
+        SET 
+            email = $1, 
+            password_hash = $2, 
+            first_name = $3, 
+            last_name = $4,
+            is_email_verified = $5, 
+            verification_code = $6, 
+            updated_at = $7
+        WHERE id = $8
+    `
+	result, err := r.db.Exec(query,
+		user.Email, user.PasswordHash, user.FirstName, user.LastName,
+		user.IsEmailVerified, user.VerificationCode, user.UpdatedAt,
+		user.ID,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if rowsAffected == 0 {
+		return errors.New("user not found")
+	}
+
+	return nil
+}
+
+// UpdateVerificationCode - РѕР±РЅРѕРІР»РµРЅРёРµ С‚РѕР»СЊРєРѕ РєРѕРґР° РІРµСЂРёС„РёРєР°С†РёРё
+func (r *UserRepository) UpdateVerificationCode(userID uuid.UUID, code string) error {
+	query := `
+        UPDATE users 
+        SET verification_code = $1, updated_at = $2 
+        WHERE id = $3
+    `
+	_, err := r.db.Exec(query, code, time.Now(), userID)
+	return err
+}
+
+// VerifyEmail - РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email (СЃР±СЂР°СЃС‹РІР°РµС‚ РєРѕРґ Рё СѓСЃС‚Р°РЅР°РІР»РёРІР°РµС‚ С„Р»Р°Рі)
+func (r *UserRepository) VerifyEmail(userID uuid.UUID) error {
+	query := `
+        UPDATE users 
+        SET 
+            is_email_verified = true, 
+            verification_code = NULL, 
+            updated_at = $1 
+        WHERE id = $2
+    `
+	_, err := r.db.Exec(query, time.Now(), userID)
+	return err
+}
+
+// EmailExists - РїСЂРѕРІРµСЂРєР° СЃСѓС‰РµСЃС‚РІРѕРІР°РЅРёСЏ email
+func (r *UserRepository) EmailExists(email string) (bool, error) {
+	var exists bool
+	query := `SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)`
+	err := r.db.QueryRow(query, email).Scan(&exists)
+	return exists, err
+}
+
+// GetUnverifiedUsers - РїРѕР»СѓС‡РµРЅРёРµ РІСЃРµС… РЅРµРїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹С… РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ (РґР»СЏ Р°РґРјРёРЅРєРё)
+func (r *UserRepository) GetUnverifiedUsers() ([]models.User, error) {
+	query := `
+        SELECT 
+            id, email, first_name, last_name,
+            is_email_verified, verification_code, created_at
+        FROM users 
+        WHERE is_email_verified = false
+        ORDER BY created_at DESC
+    `
+
+	rows, err := r.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []models.User
+	for rows.Next() {
+		var user models.User
+		err := rows.Scan(
+			&user.ID, &user.Email, &user.FirstName, &user.LastName,
+			&user.IsEmailVerified, &user.VerificationCode, &user.CreatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+
+	return users, nil
+}
+
+// DeleteUnverifiedOldUsers - СѓРґР°Р»РµРЅРёРµ СЃС‚Р°СЂС‹С… РЅРµРїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹С… РїРѕР»СЊР·РѕРІР°С‚РµР»РµР№ (РѕС‡РёСЃС‚РєР°)
+func (r *UserRepository) DeleteUnverifiedOldUsers(hours int) (int64, error) {
+	query := `
+        DELETE FROM users 
+        WHERE is_email_verified = false 
+        AND created_at < NOW() - INTERVAL '1 hour' * $1
+    `
+	result, err := r.db.Exec(query, hours)
+	if err != nil {
+		return 0, err
+	}
+
+	return result.RowsAffected()
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\audit_service.go ===
+package services
+
+import (
+    "time"
+
+    "github.com/google/uuid"
+
+    "cloud-storage-go/internal/repository"
+)
+
+type AuditService struct {
+    auditRepo *repository.AuditRepository
+}
+
+func NewAuditService(auditRepo *repository.AuditRepository) *AuditService {
+    return &AuditService{auditRepo: auditRepo}
+}
+
+func (s *AuditService) Log(userID uuid.UUID, userEmail, action, entityType string, entityID *uuid.UUID, entityName, details, ip, userAgent string) error {
+    log := &repository.AuditLog{
+        ID:         uuid.New(),
+        UserID:     userID,
+        UserEmail:  userEmail,
+        Action:     action,
+        EntityType: entityType,
+        EntityID:   entityID,
+        EntityName: entityName,
+        Details:    details,
+        IPAddress:  ip,
+        UserAgent:  userAgent,
+        CreatedAt:  time.Now(),
+    }
+    return s.auditRepo.Create(log)
+}
+
+func (s *AuditService) GetLogs(page, limit int) ([]repository.AuditLog, int64, error) {
+    offset := (page - 1) * limit
+    return s.auditRepo.GetLogs(limit, offset)
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\auth_service.go ===
+package services
+
+import (
+	"context"
+	"errors"
+	"log"
+	"time"
+
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
+
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/oauth" // РґРѕР±Р°РІРёС‚СЊ СЌС‚РѕС‚ РёРјРїРѕСЂС‚
+	"cloud-storage-go/internal/repository"
+	"cloud-storage-go/internal/utils"
+)
+
+type AuthService struct {
+	userRepo     *repository.UserRepository
+	oauthRepo    *repository.OAuthRepository // РґРѕР±Р°РІРёС‚СЊ
+	jwtUtil      *utils.JWTUtil
+	emailService *EmailService
+}
+
+func NewAuthService(
+	userRepo *repository.UserRepository,
+	oauthRepo *repository.OAuthRepository, // Р”РѕР±Р°РІР»РµРЅ
+	jwtUtil *utils.JWTUtil,
+	emailService *EmailService,
+) *AuthService {
+	return &AuthService{
+		userRepo:     userRepo,
+		oauthRepo:    oauthRepo, // Р”РѕР±Р°РІР»РµРЅ
+		jwtUtil:      jwtUtil,
+		emailService: emailService,
+	}
+}
+
+// Register - СЂРµРіРёСЃС‚СЂР°С†РёСЏ СЃ РѕС‚РїСЂР°РІРєРѕР№ РєРѕРґР° (РІРѕР·РІСЂР°С‰Р°РµС‚ RegisterResponse)
+func (s *AuthService) Register(req *models.UserRegisterRequest) (*models.RegisterResponse, error) {
+	log.Println("========== REGISTER METHOD CALLED ==========")
+	log.Printf("Email: %s", req.Email)
+	log.Printf("FirstName: %s", req.FirstName)
+	log.Printf("LastName: %s", req.LastName)
+	// РџСЂРѕРІРµСЂСЏРµРј, СЃСѓС‰РµСЃС‚РІСѓРµС‚ Р»Рё РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ
+	existingUser, _ := s.userRepo.GetByEmail(req.Email)
+	if existingUser != nil {
+		return nil, errors.New("user already exists")
+	}
+	verificationCode, err := s.emailService.GenerateVerificationCode()
+	if err != nil {
+		return nil, err
+	}
+	// РҐРµС€РёСЂСѓРµРј РїР°СЂРѕР»СЊ
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:               uuid.New(),
+		Email:            req.Email,
+		PasswordHash:     string(hashedPassword),
+		FirstName:        req.FirstName,
+		LastName:         req.LastName,
+		IsEmailVerified:  true,
+		VerificationCode: verificationCode,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	if err := s.userRepo.Create(user); err != nil {
+		return nil, err
+	}
+
+	// рџ”Ґ РћС‚РїСЂР°РІР»СЏРµРј РїРёСЃСЊРјРѕ СЃ РєРѕРґРѕРј
+	go s.emailService.SendVerificationEmail(user.Email, verificationCode, user.FirstName)
+
+	// вњ… Р’РѕР·РІСЂР°С‰Р°РµРј RegisterResponse
+	return &models.RegisterResponse{
+		Message: "Registration successful! Please check your email for verification code.",
+		Email:   user.Email,
+	}, nil
+}
+
+// VerifyEmail - РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email (РІРѕР·РІСЂР°С‰Р°РµС‚ AuthResponse СЃ С‚РѕРєРµРЅРѕРј)
+func (s *AuthService) VerifyEmail(req *models.VerifyEmailRequest) (*models.AuthResponse, error) {
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		return nil, errors.New("user not found")
+	}
+
+	if user.VerificationCode != req.Code {
+		return nil, errors.New("invalid verification code")
+	}
+
+	// РћР±РЅРѕРІР»СЏРµРј СЃС‚Р°С‚СѓСЃ
+	user.IsEmailVerified = true
+	user.VerificationCode = ""
+	user.UpdatedAt = time.Now()
+
+	if err := s.userRepo.Update(user); err != nil {
+		return nil, err
+	}
+
+	// Р“РµРЅРµСЂРёСЂСѓРµРј С‚РѕРєРµРЅ
+	token, err := s.jwtUtil.GenerateToken(user.ID, user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.AuthResponse{
+		Token: token,
+		User:  user,
+	}, nil
+}
+
+// ResendCode - РїРѕРІС‚РѕСЂРЅР°СЏ РѕС‚РїСЂР°РІРєР° РєРѕРґР°
+func (s *AuthService) ResendCode(req *models.ResendCodeRequest) error {
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		return errors.New("user not found")
+	}
+
+	if user.IsEmailVerified {
+		return errors.New("email already verified")
+	}
+
+	// Р“РµРЅРµСЂРёСЂСѓРµРј РЅРѕРІС‹Р№ РєРѕРґ
+	newCode, err := s.emailService.GenerateVerificationCode()
+	if err != nil {
+		return err
+	}
+
+	user.VerificationCode = newCode
+	user.UpdatedAt = time.Now()
+
+	if err := s.userRepo.Update(user); err != nil {
+		return err
+	}
+
+	// РћС‚РїСЂР°РІР»СЏРµРј РЅРѕРІС‹Р№ РєРѕРґ
+	go s.emailService.SendVerificationEmail(user.Email, newCode, user.FirstName)
+
+	return nil
+}
+
+// Login - РІС…РѕРґ С‚РѕР»СЊРєРѕ РґР»СЏ РїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹С… email
+func (s *AuthService) Login(req *models.UserLoginRequest) (*models.AuthResponse, error) {
+	log.Println("========== LOGIN ATTEMPT ==========")
+	log.Printf("Email: %s", req.Email)
+
+	// РС‰РµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+	user, err := s.userRepo.GetByEmail(req.Email)
+	if err != nil {
+		log.Printf("вќЊ User not found")
+		return nil, errors.New("invalid credentials")
+	}
+
+	// РџСЂРѕРІРµСЂСЏРµРј РїР°СЂРѕР»СЊ
+	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password))
+	if err != nil {
+		log.Printf("вќЊ Password mismatch")
+		return nil, errors.New("invalid credentials")
+	}
+
+	// вњ… РџСЂРѕРІРµСЂСЏРµРј РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email
+	/*if !user.IsEmailVerified {
+		log.Printf("вќЊ Email not verified")
+		return nil, errors.New("РџРѕРґС‚РІРµСЂРґРёС‚Рµ РІР°С€ Р°РґСЂРµСЃСЃ РїРѕС‡С‚С‹")
+	}*/
+
+	log.Println("вњ… Login successful")
+
+	// Р“РµРЅРµСЂРёСЂСѓРµРј С‚РѕРєРµРЅ
+	token, err := s.jwtUtil.GenerateToken(user.ID, user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.AuthResponse{
+		Token: token,
+		User:  user,
+	}, nil
+}
+func (s *AuthService) OAuthLogin(ctx context.Context, userInfo *oauth.UserInfo, token *oauth2.Token) (*models.AuthResponse, error) {
+	// РС‰РµРј СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёР№ OAuth Р°РєРєР°СѓРЅС‚
+	oauthAccount, err := s.oauthRepo.FindByProvider(userInfo.Provider, userInfo.ProviderID)
+
+	if err == nil {
+		// РђРєРєР°СѓРЅС‚ РЅР°Р№РґРµРЅ - РїРѕР»СѓС‡Р°РµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+		user, err := s.userRepo.GetByID(oauthAccount.UserID)
+		if err != nil {
+			return nil, err
+		}
+
+		// РћР±РЅРѕРІР»СЏРµРј С‚РѕРєРµРЅС‹
+		oauthAccount.AccessToken = token.AccessToken
+		if token.RefreshToken != "" {
+			oauthAccount.RefreshToken = &token.RefreshToken
+		}
+		if !token.Expiry.IsZero() {
+			oauthAccount.TokenExpiry = &token.Expiry
+		}
+		s.oauthRepo.Update(oauthAccount)
+
+		// Р“РµРЅРµСЂРёСЂСѓРµРј JWT
+		jwtToken, err := s.jwtUtil.GenerateToken(user.ID, user.Email)
+		if err != nil {
+			return nil, err
+		}
+
+		return &models.AuthResponse{
+			Token: jwtToken,
+			User:  user,
+		}, nil
+	}
+
+	// РђРєРєР°СѓРЅС‚ РЅРµ РЅР°Р№РґРµРЅ - РёС‰РµРј РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ email
+	user, err := s.userRepo.GetByEmail(userInfo.Email)
+	if err != nil {
+		// РЎРѕР·РґР°РµРј РЅРѕРІРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+		user = &models.User{
+			ID:              uuid.New(),
+			Email:           userInfo.Email,
+			FirstName:       userInfo.FirstName,
+			LastName:        userInfo.LastName,
+			AvatarURL:       userInfo.AvatarURL,
+			IsEmailVerified: true,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
+		}
+		if err := s.userRepo.Create(user); err != nil {
+			return nil, err
+		}
+	}
+
+	// РЎРѕР·РґР°РµРј OAuth Р°РєРєР°СѓРЅС‚
+	newOAuthAccount := &models.OAuthAccount{
+		ID:             uuid.New(),
+		UserID:         user.ID,
+		Provider:       userInfo.Provider,
+		ProviderUserID: userInfo.ProviderID,
+		AccessToken:    token.AccessToken,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+	if token.RefreshToken != "" {
+		newOAuthAccount.RefreshToken = &token.RefreshToken
+	}
+	if !token.Expiry.IsZero() {
+		newOAuthAccount.TokenExpiry = &token.Expiry
+	}
+
+	if err := s.oauthRepo.Create(newOAuthAccount); err != nil {
+		return nil, err
+	}
+
+	// Р“РµРЅРµСЂРёСЂСѓРµРј JWT
+	jwtToken, err := s.jwtUtil.GenerateToken(user.ID, user.Email)
+	if err != nil {
+		return nil, err
+	}
+
+	return &models.AuthResponse{
+		Token: jwtToken,
+		User:  user,
+	}, nil
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\email_service.go ===
+package services
+
+import (
+	"crypto/rand"
+	"fmt"
+	"log"
+	"os"
+
+	"gopkg.in/gomail.v2"
+)
+
+type EmailService struct {
+	fromEmail    string
+	fromPassword string
+	smtpHost     string
+	smtpPort     int
+}
+
+func NewEmailService() *EmailService {
+	// Р’ СЂРµР°Р»СЊРЅРѕРј РїСЂРѕРµРєС‚Рµ Р±РµСЂРё РёР· РєРѕРЅС„РёРіР°
+	return &EmailService{
+		fromEmail:    os.Getenv("SMTP_EMAIL"),
+		fromPassword: os.Getenv("SMTP_PASSWORD"),
+		smtpHost:     os.Getenv("SMTP_HOST"),
+		smtpPort:     587, // Р”Р»СЏ Gmail, Outlook Рё РґСЂ.
+	}
+}
+
+// GenerateVerificationCode РіРµРЅРµСЂРёСЂСѓРµС‚ 6-Р·РЅР°С‡РЅС‹Р№ РєРѕРґ
+func (s *EmailService) GenerateVerificationCode() (string, error) {
+	max := 999999
+	min := 100000
+
+	b := make([]byte, 4)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+
+	code := min + (int(b[0])<<24|int(b[1])<<16|int(b[2])<<8|int(b[3]))%(max-min+1)
+	return fmt.Sprintf("%06d", code), nil
+}
+
+// SendVerificationEmail РѕС‚РїСЂР°РІР»СЏРµС‚ РєРѕРґ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ
+func (s *EmailService) SendVerificationEmail(toEmail, code, firstName string) error {
+	m := gomail.NewMessage()
+	m.SetHeader("From", s.fromEmail)
+	m.SetHeader("To", toEmail)
+	m.SetHeader("Subject", "РџРѕРґС‚РІРµСЂР¶РґРµРЅРёРµ email - CloudStorage")
+
+	// HTML С€Р°Р±Р»РѕРЅ РїРёСЃСЊРјР°
+	body := fmt.Sprintf(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body { font-family: Arial, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+            .container { max-width: 600px; margin: 0 auto; background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 30px; }
+            .header { font-size: 24px; color: #58a6ff; margin-bottom: 20px; }
+            .code { font-size: 32px; font-weight: bold; color: #58a6ff; text-align: center; padding: 20px; background: #0d1117; border-radius: 8px; margin: 20px 0; }
+            .footer { font-size: 12px; color: #8b949e; margin-top: 20px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">вЃпёЏ CloudStorage</div>
+            <h2>РџСЂРёРІРµС‚, %s!</h2>
+            <p>Р”Р»СЏ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёСЏ email РІРІРµРґРёС‚Рµ СЃР»РµРґСѓСЋС‰РёР№ РєРѕРґ:</p>
+            <div class="code">%s</div>
+            <p>РљРѕРґ РґРµР№СЃС‚РІРёС‚РµР»РµРЅ РІ С‚РµС‡РµРЅРёРµ 1 С‡Р°СЃР°.</p>
+            <p>Р•СЃР»Рё РІС‹ РЅРµ СЂРµРіРёСЃС‚СЂРёСЂРѕРІР°Р»РёСЃСЊ РЅР° CloudStorage, РїСЂРѕСЃС‚Рѕ РїСЂРѕРёРіРЅРѕСЂРёСЂСѓР№С‚Рµ СЌС‚Рѕ РїРёСЃСЊРјРѕ.</p>
+            <div class="footer">В© 2026 CloudStorage. Р’СЃРµ РїСЂР°РІР° Р·Р°С‰РёС‰РµРЅС‹.</div>
+        </div>
+    </body>
+    </html>
+    `, firstName, code)
+
+	m.SetBody("text/html", body)
+
+	d := gomail.NewDialer(s.smtpHost, s.smtpPort, s.fromEmail, s.fromPassword)
+
+	if err := d.DialAndSend(m); err != nil {
+		log.Printf("Failed to send email: %v", err)
+		return err
+	}
+
+	log.Printf("Verification email sent to %s", toEmail)
+	return nil
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\file_service.go ===
+package services
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"mime"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"cloud-storage-go/internal/models"
+	"cloud-storage-go/internal/repository"
+
+	"github.com/google/uuid"
+)
+
+var allowedMimeTypes = map[string]bool{
+	"image/jpeg":         true,
+	"image/png":          true,
+	"image/gif":          true,
+	"image/webp":         true,
+	"application/pdf":    true,
+	"text/plain":         true,
+	"application/msword": true,
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+}
+
+type FileService struct {
+	fileRepo       *repository.FileRepository
+	storageService *StorageService
+	auditService   *AuditService
+	userRepo       *repository.UserRepository
+}
+
+func NewFileService(fileRepo *repository.FileRepository, storageService *StorageService, auditService *AuditService, userRepo *repository.UserRepository) *FileService {
+	return &FileService{
+		fileRepo:       fileRepo,
+		storageService: storageService,
+		auditService:   auditService,
+		userRepo:       userRepo,
+	}
+}
+
+// getUserDir - возвращает путь к папке пользователя
+func (s *FileService) getUserDir(userID uuid.UUID) string {
+	return filepath.Join(s.storageService.basePath, "users", userID.String())
+}
+func ValidateFile(filename string, size int64, mimeType string, maxSize int64) error {
+	// Проверка размера
+	if size > maxSize {
+		return errors.New("file size exceeds limit")
+	}
+
+	// Проверка MIME типа
+	if !allowedMimeTypes[mimeType] {
+		return errors.New("file type not allowed")
+	}
+
+	// Проверка расширения
+	ext := strings.ToLower(filepath.Ext(filename))
+	allowedExts := []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf", ".txt", ".doc", ".docx"}
+	allowed := false
+	for _, allowedExt := range allowedExts {
+		if ext == allowedExt {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return errors.New("file extension not allowed")
+	}
+
+	// Проверка на опасные имена файлов
+	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
+		return errors.New("invalid filename")
+	}
+
+	return nil
+}
+
+// ==================== MOVE OPERATIONS ====================
+
+// MoveFile - перемещение файла в другую папку
+func (s *FileService) MoveFile(userID uuid.UUID, fileID uuid.UUID, newParentID *uuid.UUID) error {
+	file, err := s.fileRepo.GetByID(fileID)
+	if err != nil {
+		return err
+	}
+
+	if file.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	// Проверяем целевую папку
+	if newParentID != nil {
+		parent, err := s.fileRepo.GetByID(*newParentID)
+		if err != nil {
+			return err
+		}
+		if parent.UserID != userID {
+			return errors.New("access denied to target folder")
+		}
+		if !parent.IsFolder {
+			return errors.New("target is not a folder")
+		}
+		// Проверяем, что не пытаемся переместить папку в саму себя
+		if file.IsFolder && fileID == *newParentID {
+			return errors.New("cannot move folder into itself")
+		}
+	}
+
+	oldParentID := file.ParentFolderID
+	file.ParentFolderID = newParentID
+	file.UpdatedAt = time.Now()
+
+	if err := s.fileRepo.Update(file); err != nil {
+		return err
+	}
+
+	// Обновляем размеры папок
+	if oldParentID != nil {
+		go s.updateFolderSizeRecursive(*oldParentID)
+	}
+	if newParentID != nil {
+		go s.updateFolderSizeRecursive(*newParentID)
+	}
+
+	return nil
+}
+
+// MoveFolder - перемещение папки
+func (s *FileService) MoveFolder(userID uuid.UUID, folderID uuid.UUID, newParentID *uuid.UUID) error {
+	folder, err := s.fileRepo.GetByID(folderID)
+	if err != nil {
+		return err
+	}
+
+	if folder.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	if !folder.IsFolder {
+		return errors.New("not a folder")
+	}
+
+	// Проверяем целевую папку
+	if newParentID != nil {
+		parent, err := s.fileRepo.GetByID(*newParentID)
+		if err != nil {
+			return err
+		}
+		if parent.UserID != userID {
+			return errors.New("access denied to target folder")
+		}
+		if !parent.IsFolder {
+			return errors.New("target is not a folder")
+		}
+		// Проверяем, что не пытаемся переместить папку в саму себя или в дочернюю
+		if folderID == *newParentID {
+			return errors.New("cannot move folder into itself")
+		}
+		// Проверяем циклическую ссылку
+		if s.isChildFolder(folderID, *newParentID) {
+			return errors.New("cannot move folder into its own subfolder")
+		}
+	}
+
+	oldParentID := folder.ParentFolderID
+	folder.ParentFolderID = newParentID
+	folder.UpdatedAt = time.Now()
+
+	if err := s.fileRepo.Update(folder); err != nil {
+		return err
+	}
+
+	// Обновляем размеры папок
+	if oldParentID != nil {
+		go s.updateFolderSizeRecursive(*oldParentID)
+	}
+	if newParentID != nil {
+		go s.updateFolderSizeRecursive(*newParentID)
+	}
+
+	return nil
+}
+
+// isChildFolder - проверяет, является ли folderID дочерним по отношению к targetID
+func (s *FileService) isChildFolder(folderID, targetID uuid.UUID) bool {
+	current, err := s.fileRepo.GetByID(targetID)
+	if err != nil {
+		return false
+	}
+
+	for current.ParentFolderID != nil {
+		if *current.ParentFolderID == folderID {
+			return true
+		}
+		current, err = s.fileRepo.GetByID(*current.ParentFolderID)
+		if err != nil {
+			return false
+		}
+	}
+	return false
+}
+
+// UploadFile - загрузка файла
+func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
+	filename string, fileData io.Reader, size int64, ip, userAgent string) (*models.FileUploadResponse, error) {
+
+	userDir := s.getUserDir(userID)
+
+	var targetPath string
+	if parentFolderID != nil {
+		parent, err := s.fileRepo.GetByID(*parentFolderID)
+		if err != nil {
+			return nil, fmt.Errorf("parent folder not found: %v", err)
+		}
+		// Проверяем, что это папка
+		if !parent.IsFolder {
+			return nil, errors.New("parent is not a folder")
+		}
+		// Проверяем права доступа
+		if parent.UserID != userID {
+			return nil, errors.New("access denied to parent folder")
+		}
+		targetPath = parent.Path
+	} else {
+		targetPath = userDir
+	}
+
+	// Создаем директорию если её нет
+	if err := os.MkdirAll(targetPath, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %v", err)
+	}
+
+	ext := filepath.Ext(filename)
+	storedName := uuid.New().String() + ext
+	filePath := filepath.Join(targetPath, storedName)
+
+	// Создаем и сохраняем файл
+	dst, err := os.Create(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file: %v", err)
+	}
+	defer dst.Close()
+
+	written, err := io.Copy(dst, fileData)
+	if err != nil {
+		os.Remove(filePath)
+		return nil, fmt.Errorf("failed to write file: %v", err)
+	}
+
+	mimeType := mime.TypeByExtension(ext)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	now := time.Now()
+	file := &models.File{
+		ID:             uuid.New(),
+		UserID:         userID,
+		Name:           storedName,
+		OriginalName:   filename,
+		Path:           filePath,
+		Size:           written,
+		MimeType:       mimeType,
+		IsFolder:       false,
+		ParentFolderID: parentFolderID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	if err := s.fileRepo.Create(file); err != nil {
+		os.Remove(filePath)
+		return nil, fmt.Errorf("failed to save to database: %v", err)
+	}
+
+	// Обновляем размер родительской папки
+	if parentFolderID != nil {
+		go func() {
+			if err := s.updateFolderSizeRecursive(*parentFolderID); err != nil {
+				log.Printf("Error updating folder size: %v", err)
+			}
+		}()
+	}
+
+	// Аудит
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "upload", "file", &file.ID, filename,
+				fmt.Sprintf("Файл загружен в папку %v", parentFolderID), ip, userAgent)
+		}
+	}
+
+	return &models.FileUploadResponse{
+		ID:        file.ID,
+		Name:      filename,
+		Size:      written,
+		MimeType:  mimeType,
+		CreatedAt: now,
+	}, nil
+}
+
+// CreateFolder - создание папки
+func (s *FileService) CreateFolder(userID uuid.UUID, name string, parentFolderID *uuid.UUID, ip, userAgent string) (*models.File, error) {
+	now := time.Now()
+
+	userDir := s.getUserDir(userID)
+
+	var folderPath string
+	if parentFolderID != nil {
+		parent, err := s.fileRepo.GetByID(*parentFolderID)
+		if err != nil {
+			return nil, err
+		}
+		folderPath = filepath.Join(parent.Path, name+"_"+uuid.New().String())
+	} else {
+		folderPath = filepath.Join(userDir, name+"_"+uuid.New().String())
+	}
+
+	if err := os.MkdirAll(folderPath, 0755); err != nil {
+		return nil, err
+	}
+
+	folder := &models.File{
+		ID:             uuid.New(),
+		UserID:         userID,
+		Name:           name,
+		OriginalName:   name,
+		Path:           folderPath,
+		Size:           0,
+		FolderSize:     0,
+		MimeType:       "inode/directory",
+		IsFolder:       true,
+		ParentFolderID: parentFolderID,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+
+	if err := s.fileRepo.Create(folder); err != nil {
+		os.RemoveAll(folderPath)
+		return nil, err
+	}
+
+	// Обновляем размер родительской папки
+	if parentFolderID != nil {
+		go s.updateFolderSizeRecursive(*parentFolderID)
+	}
+
+	// Аудит
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "create_folder", "folder", &folder.ID, name,
+				"Папка создана", ip, userAgent)
+		}
+	}
+
+	return folder, nil
+}
+
+// ==================== GET / LIST ====================
+
+// GetUserFiles - получение файлов пользователя
+func (s *FileService) GetUserFiles(userID uuid.UUID, parentFolderID *uuid.UUID, page, limit int) ([]models.File, int64, error) {
+	files, total, err := s.fileRepo.GetByUserID(userID, parentFolderID, page, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Для папок подставляем folder_size вместо size
+	for i := range files {
+		if files[i].IsFolder {
+			if files[i].FolderSize == 0 && files[i].ID != uuid.Nil {
+				// Получаем размер из базы
+				size, err := s.fileRepo.GetFolderSize(files[i].ID)
+				if err == nil && size > 0 {
+					files[i].FolderSize = size
+				}
+			}
+			files[i].Size = files[i].FolderSize
+		}
+	}
+
+	return files, total, nil
+}
+
+// GetFileByID - получение файла по ID
+func (s *FileService) GetFileByID(fileID uuid.UUID) (*models.File, error) {
+	return s.fileRepo.GetByID(fileID)
+}
+
+// GetFileContent - получение содержимого файла
+func (s *FileService) GetFileContent(filePath string) (*os.File, error) {
+	return os.Open(filePath)
+}
+
+// GetUserStorageStats - получение статистики хранилища (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ)
+func (s *FileService) GetUserStorageStats(userID uuid.UUID) (map[string]interface{}, error) {
+	totalSize, fileCount, folderCount, err := s.fileRepo.GetUserStorageStats(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"total_size":   totalSize,
+		"file_count":   fileCount,
+		"folder_count": folderCount,
+		"total_items":  fileCount + folderCount,
+	}, nil
+}
+
+// GetFolderContentsWithSize - получение содержимого папки с размерами
+func (s *FileService) GetFolderContentsWithSize(userID uuid.UUID, folderID *uuid.UUID) ([]models.File, error) {
+	files, _, err := s.fileRepo.GetByUserID(userID, folderID, 1, 1000)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range files {
+		if files[i].IsFolder {
+			size, err := s.fileRepo.GetFolderSize(files[i].ID)
+			if err == nil {
+				files[i].Size = size
+			}
+		}
+	}
+
+	return files, nil
+}
+
+// ==================== UPDATE / RENAME ====================
+
+// RenameFile - переименование файла
+func (s *FileService) RenameFile(userID uuid.UUID, fileID uuid.UUID, newName string) error {
+	file, err := s.fileRepo.GetByID(fileID)
+	if err != nil {
+		return err
+	}
+
+	if file.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	file.Name = newName
+	file.OriginalName = newName
+	file.UpdatedAt = time.Now()
+
+	return s.fileRepo.Update(file)
+}
+
+// RenameFolder - переименование папки
+func (s *FileService) RenameFolder(userID uuid.UUID, folderID uuid.UUID, newName string) error {
+	folder, err := s.fileRepo.GetByID(folderID)
+	if err != nil {
+		return err
+	}
+
+	if folder.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	if !folder.IsFolder {
+		return errors.New("not a folder")
+	}
+
+	folder.Name = newName
+	folder.OriginalName = newName
+	folder.UpdatedAt = time.Now()
+
+	return s.fileRepo.Update(folder)
+}
+
+// ==================== DELETE ====================
+
+// DeleteFile - удаление файла
+func (s *FileService) DeleteFile(userID uuid.UUID, fileID uuid.UUID, ip, userAgent string) error {
+	file, err := s.fileRepo.GetByID(fileID)
+	if err != nil {
+		return err
+	}
+
+	if file.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	parentID := file.ParentFolderID
+
+	if !file.IsFolder && file.Path != "" {
+		if err := s.storageService.DeleteFile(file.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	if err := s.fileRepo.Delete(fileID); err != nil {
+		return err
+	}
+
+	// Обновляем размер родительской папки
+	if parentID != nil {
+		go s.updateFolderSizeRecursive(*parentID)
+	}
+
+	// Аудит
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "delete", "file", &fileID, file.Name,
+				"Файл удален", ip, userAgent)
+		}
+	}
+
+	return nil
+}
+
+// DeleteFolder - удаление папки
+func (s *FileService) DeleteFolder(userID uuid.UUID, folderID uuid.UUID, ip, userAgent string) error {
+	folder, err := s.fileRepo.GetByID(folderID)
+	if err != nil {
+		return err
+	}
+
+	if folder.UserID != userID {
+		return errors.New("access denied")
+	}
+
+	if !folder.IsFolder {
+		return errors.New("not a folder")
+	}
+
+	parentID := folder.ParentFolderID
+
+	if folder.Path != "" {
+		if err := os.RemoveAll(folder.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	if err := s.fileRepo.Delete(folderID); err != nil {
+		return err
+	}
+
+	// Обновляем размер родительской папки
+	if parentID != nil {
+		go s.updateFolderSizeRecursive(*parentID)
+	}
+
+	// Аудит
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "delete_folder", "folder", &folderID, folder.Name,
+				"Папка удалена", ip, userAgent)
+		}
+	}
+
+	return nil
+}
+
+// ==================== SIZE CALCULATION ====================
+
+// updateFolderSizeRecursive - обновляет размер папки и всех родителей
+func (s *FileService) updateFolderSizeRecursive(folderID uuid.UUID) error {
+	// Используем оптимизированный метод репозитория
+	err := s.fileRepo.UpdateFolderSizeRecursive(folderID)
+	if err != nil {
+		log.Printf("Error updating folder size for %s: %v", folderID, err)
+	}
+	return err
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\library_service.go ===
+package services
+
+import (
+	"database/sql"
+	"errors"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/google/uuid"
+
+	"cloud-storage-go/internal/crypto"
+	"cloud-storage-go/internal/repository"
+)
+
+type LibraryService struct {
+	libRepo      *repository.LibraryRepository
+	userRepo     *repository.UserRepository
+	crypto       *crypto.EncryptionService
+	uploadPath   string
+	auditService *AuditService
+}
+
+func NewLibraryService(libRepo *repository.LibraryRepository, userRepo *repository.UserRepository,
+	crypto *crypto.EncryptionService, uploadPath string, auditService *AuditService) *LibraryService {
+	return &LibraryService{
+		libRepo:      libRepo,
+		userRepo:     userRepo,
+		crypto:       crypto,
+		uploadPath:   filepath.Join(uploadPath, "library"),
+		auditService: auditService,
+	}
+}
+
+func (s *LibraryService) CheckAdmin(userID uuid.UUID) error {
+	isAdmin, err := s.libRepo.IsAdmin(userID)
+	if err != nil {
+		return err
+	}
+	if !isAdmin {
+		return errors.New("admin access required")
+	}
+	return nil
+}
+
+func (s *LibraryService) IsAdmin(userID uuid.UUID) (bool, error) {
+	return s.libRepo.IsAdmin(userID)
+}
+
+// InitAdminsFromConfig - инициализирует администраторов из конфига
+func (s *LibraryService) InitAdminsFromConfig(adminEmails []string, initiatorID uuid.UUID) error {
+	return s.libRepo.InitAdminsFromConfig(adminEmails, initiatorID)
+}
+
+// GetLibraryStorageStats - получает статистику всей библиотеки
+func (s *LibraryService) GetLibraryStorageStats() (map[string]interface{}, error) {
+	totalSize, fileCount, folderCount, err := s.libRepo.GetLibraryStorageStats()
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("Library stats: totalSize=%d, files=%d, folders=%d", totalSize, fileCount, folderCount)
+
+	return map[string]interface{}{
+		"total_size":   totalSize,
+		"file_count":   fileCount,
+		"folder_count": folderCount,
+		"total_items":  fileCount + folderCount,
+	}, nil
+}
+
+// GetItems - получение элементов с подсчетом размера папок
+func (s *LibraryService) GetItems(userID uuid.UUID, parentID *uuid.UUID) ([]repository.LibraryItem, error) {
+	items, err := s.libRepo.GetItems(parentID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Для каждой папки вычисляем размер
+	for i := range items {
+		if items[i].IsFolder {
+			// Вычисляем размер папки рекурсивно
+			size, err := s.calculateFolderSize(items[i].ID)
+			if err == nil {
+				items[i].Size = size
+				// Сохраняем в базу для кэширования
+				s.libRepo.UpdateFolderSize(items[i].ID, size)
+			}
+		}
+	}
+
+	return items, nil
+}
+
+// calculateFolderSize - рекурсивный подсчет размера папки в библиотеке
+func (s *LibraryService) calculateFolderSize(folderID uuid.UUID) (int64, error) {
+	// Получаем все содержимое папки
+	children, err := s.libRepo.GetItems(&folderID)
+	if err != nil {
+		return 0, err
+	}
+
+	var totalSize int64 = 0
+	for _, child := range children {
+		if child.IsFolder {
+			// Рекурсивно считаем размер подпапки
+			size, err := s.calculateFolderSize(child.ID)
+			if err != nil {
+				log.Printf("Error calculating subfolder size: %v", err)
+				continue
+			}
+			totalSize += size
+		} else {
+			// Добавляем размер файла
+			totalSize += child.Size
+		}
+	}
+
+	return totalSize, nil
+}
+
+// UpdateFolderSize - обновляет размер папки и всех родителей
+func (s *LibraryService) UpdateFolderSize(folderID uuid.UUID) error {
+	size, err := s.calculateFolderSize(folderID)
+	if err != nil {
+		return err
+	}
+
+	if err := s.libRepo.UpdateFolderSize(folderID, size); err != nil {
+		return err
+	}
+
+	// Обновляем родительскую папку
+	item, err := s.libRepo.GetItem(folderID)
+	if err != nil {
+		return err
+	}
+
+	if item.ParentID != nil {
+		return s.UpdateFolderSize(*item.ParentID)
+	}
+
+	return nil
+}
+
+func (s *LibraryService) CreateFolder(userID uuid.UUID, name string, parentID *uuid.UUID, ip, userAgent string) (*repository.LibraryItem, error) {
+	if err := s.CheckAdmin(userID); err != nil {
+		return nil, err
+	}
+
+	var folderPath string
+	if parentID != nil {
+		parent, err := s.libRepo.GetItem(*parentID)
+		if err != nil {
+			return nil, err
+		}
+		if !parent.IsFolder {
+			return nil, errors.New("parent is not a folder")
+		}
+		folderPath = filepath.Join(parent.Path.String, name+"_"+uuid.New().String())
+	} else {
+		folderPath = filepath.Join(s.uploadPath, name+"_"+uuid.New().String())
+	}
+
+	if err := os.MkdirAll(folderPath, 0755); err != nil {
+		return nil, err
+	}
+
+	item := &repository.LibraryItem{
+		ID:        uuid.New(),
+		Name:      name,
+		IsFolder:  true,
+		ParentID:  parentID,
+		Path:      sql.NullString{String: folderPath, Valid: true},
+		Version:   1,
+		CreatedBy: userID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	err := s.libRepo.CreateItem(item)
+	if err != nil {
+		os.RemoveAll(folderPath)
+		return nil, err
+	}
+
+	// Обновляем размер родительской папки
+	if parentID != nil {
+		go func() {
+			if err := s.UpdateFolderSize(*parentID); err != nil {
+				log.Printf("Error updating parent folder size: %v", err)
+			}
+		}()
+	}
+
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "library_create_folder", "library_item", &item.ID, name,
+				"В библиотеке создана папка", ip, userAgent)
+		}
+	}
+
+	return item, nil
+}
+
+func (s *LibraryService) UploadFile(userID uuid.UUID, parentID *uuid.UUID, filename string,
+	data io.Reader, size int64, ip, userAgent string) (*repository.LibraryItem, error) {
+
+	if err := s.CheckAdmin(userID); err != nil {
+		return nil, err
+	}
+
+	var targetPath string
+	if parentID != nil {
+		parent, err := s.libRepo.GetItem(*parentID)
+		if err != nil {
+			return nil, err
+		}
+		if !parent.IsFolder {
+			return nil, errors.New("parent is not a folder")
+		}
+		targetPath = parent.Path.String
+	} else {
+		targetPath = s.uploadPath
+	}
+
+	if err := os.MkdirAll(targetPath, 0755); err != nil {
+		return nil, err
+	}
+
+	tmpFile, err := os.CreateTemp("", "lib_upload_*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpFile.Name())
+
+	written, err := io.Copy(tmpFile, data)
+	tmpFile.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedPath := filepath.Join(targetPath, uuid.New().String()+".enc")
+	if err := s.crypto.EncryptFile(tmpFile.Name(), encryptedPath); err != nil {
+		return nil, err
+	}
+
+	item := &repository.LibraryItem{
+		ID:        uuid.New(),
+		Name:      filename,
+		MimeType:  s.getMimeType(filename),
+		Size:      written,
+		Path:      sql.NullString{String: encryptedPath, Valid: true},
+		IsFolder:  false,
+		ParentID:  parentID,
+		Version:   1,
+		CreatedBy: userID,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+
+	if err := s.libRepo.CreateItem(item); err != nil {
+		os.Remove(encryptedPath)
+		return nil, err
+	}
+
+	// Обновляем размер родительской папки
+	if parentID != nil {
+		go func() {
+			if err := s.UpdateFolderSize(*parentID); err != nil {
+				log.Printf("Error updating parent folder size: %v", err)
+			}
+		}()
+	}
+
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "library_upload", "library_item", &item.ID, filename,
+				"В библиотеку загружен файл", ip, userAgent)
+		}
+	}
+
+	return item, nil
+}
+
+func (s *LibraryService) DownloadFile(userID uuid.UUID, itemID uuid.UUID, _ string) ([]byte, string, error) {
+	item, err := s.libRepo.GetItem(itemID)
+	if err != nil {
+		return nil, "", err
+	}
+	if item.IsFolder {
+		return nil, "", errors.New("cannot download folder")
+	}
+	if !item.Path.Valid || item.Path.String == "" {
+		return nil, "", errors.New("file has no stored path")
+	}
+
+	tmpFile, err := os.CreateTemp("", "lib_download_*")
+	if err != nil {
+		return nil, "", err
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(tmpPath)
+
+	if err := s.crypto.DecryptFile(item.Path.String, tmpPath); err != nil {
+		return nil, "", err
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, item.Name, nil
+}
+
+func (s *LibraryService) UpdateItem(userID uuid.UUID, itemID uuid.UUID, name, description string) error {
+	if err := s.CheckAdmin(userID); err != nil {
+		return err
+	}
+	it, err := s.libRepo.GetItem(itemID)
+	if err != nil {
+		return err
+	}
+	it.Name = name
+	it.Description = sql.NullString{String: description, Valid: description != ""}
+	updatedByStr := userID.String()
+	it.UpdatedBy = sql.NullString{String: updatedByStr, Valid: true}
+	return s.libRepo.UpdateItem(it)
+}
+
+func (s *LibraryService) DeleteItem(userID uuid.UUID, itemID uuid.UUID, ip, userAgent string) error {
+	if err := s.CheckAdmin(userID); err != nil {
+		return err
+	}
+	it, err := s.libRepo.GetItem(itemID)
+	if err != nil {
+		return err
+	}
+
+	itemName := it.Name
+	parentID := it.ParentID
+
+	if !it.IsFolder && it.Path.Valid && it.Path.String != "" {
+		os.Remove(it.Path.String)
+	} else if it.IsFolder && it.Path.Valid && it.Path.String != "" {
+		os.RemoveAll(it.Path.String)
+	}
+
+	if err := s.libRepo.DeleteItem(itemID); err != nil {
+		return err
+	}
+
+	// Обновляем размер родительской папки
+	if parentID != nil {
+		go func() {
+			if err := s.UpdateFolderSize(*parentID); err != nil {
+				log.Printf("Error updating parent folder size after delete: %v", err)
+			}
+		}()
+	}
+
+	if s.auditService != nil {
+		user, _ := s.userRepo.GetByID(userID)
+		if user != nil {
+			go s.auditService.Log(userID, user.Email, "library_delete", "library_item", &itemID, itemName,
+				"Удален из библиотеки", ip, userAgent)
+		}
+	}
+
+	return nil
+}
+
+func (s *LibraryService) ListAdmins() ([]repository.LibraryAdmin, error) {
+	return s.libRepo.ListAdmins()
+}
+
+func (s *LibraryService) AddAdmin(email string, addedBy uuid.UUID) error {
+	isAdmin, err := s.libRepo.IsAdmin(addedBy)
+	if err != nil || !isAdmin {
+		return errors.New("admin access required")
+	}
+	return s.libRepo.AddAdmin(email, addedBy)
+}
+
+func (s *LibraryService) RemoveAdmin(email string, removedBy uuid.UUID) error {
+	isAdmin, err := s.libRepo.IsAdmin(removedBy)
+	if err != nil || !isAdmin {
+		return errors.New("admin access required")
+	}
+	return s.libRepo.RemoveAdmin(email)
+}
+
+func (s *LibraryService) getMimeType(filename string) string {
+	ext := filepath.Ext(filename)
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
+		return "image/" + ext[1:]
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".md":
+		return "text/plain"
+	case ".doc", ".docx":
+		return "application/msword"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\services\storage_service.go ===
+package services
+
+import (
+	"io"
+	"mime"
+	"os"
+	"path/filepath"
+
+	"github.com/google/uuid"
+)
+
+type StorageService struct {
+	basePath string
+}
+
+func NewStorageService(basePath string) *StorageService {
+	return &StorageService{
+		basePath: basePath,
+	}
+}
+
+func (s *StorageService) SaveFile(userID uuid.UUID, filename string, fileData io.Reader) (string, int64, error) {
+	// Р“РµРЅРµСЂРёСЂСѓРµРј СѓРЅРёРєР°Р»СЊРЅРѕРµ РёРјСЏ С„Р°Р№Р»Р°
+	ext := filepath.Ext(filename)
+	uniqueID := uuid.New().String()
+	storedName := uniqueID + ext
+
+	// РЎРѕР·РґР°РµРј РґРёСЂРµРєС‚РѕСЂРёСЋ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ
+	userDir := filepath.Join(s.basePath, userID.String())
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		return "", 0, err
+	}
+
+	// РџРѕР»РЅС‹Р№ РїСѓС‚СЊ Рє С„Р°Р№Р»Сѓ
+	filePath := filepath.Join(userDir, storedName)
+
+	// РЎРѕР·РґР°РµРј Рё СЃРѕС…СЂР°РЅСЏРµРј С„Р°Р№Р»
+	dst, err := os.Create(filePath)
+	if err != nil {
+		return "", 0, err
+	}
+	defer dst.Close()
+
+	written, err := io.Copy(dst, fileData)
+	if err != nil {
+		os.Remove(filePath)
+		return "", 0, err
+	}
+
+	return filePath, written, nil
+}
+
+func (s *StorageService) GetFile(filePath string) (*os.File, error) {
+	return os.Open(filePath)
+}
+
+func (s *StorageService) DeleteFile(filePath string) error {
+	return os.Remove(filePath)
+}
+
+func (s *StorageService) GetFileSize(filePath string) (int64, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func (s *StorageService) GetMimeType(filename string) string {
+	ext := filepath.Ext(filename)
+	mimeType := mime.TypeByExtension(ext)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return mimeType
+}
+
+func (s *StorageService) FileExists(filePath string) bool {
+	_, err := os.Stat(filePath)
+	return !os.IsNotExist(err)
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\utils\hash_utils.go ===
+package utils
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// HashPassword С…РµС€РёСЂСѓРµС‚ РїР°СЂРѕР»СЊ
+func HashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+
+// CheckPasswordHash РїСЂРѕРІРµСЂСЏРµС‚ РїР°СЂРѕР»СЊ РїСЂРѕС‚РёРІ С…РµС€Р°
+func CheckPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+// GenerateRandomString РіРµРЅРµСЂРёСЂСѓРµС‚ СЃР»СѓС‡Р°Р№РЅСѓСЋ СЃС‚СЂРѕРєСѓ СѓРєР°Р·Р°РЅРЅРѕР№ РґР»РёРЅС‹
+func GenerateRandomString(length int) (string, error) {
+	bytes := make([]byte, length)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(bytes)[:length], nil
+}
+
+
+=== Z:\GoPro\cloud-storage-go\internal\utils\jwt_utils.go ===
+package utils
+
+import (
+	"log"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+)
+
+type JWTUtil struct {
+	secretKey []byte
+	expiresIn time.Duration
+}
+
+func NewJWTUtil(secretKey string, expiresIn time.Duration) *JWTUtil {
+	log.Printf("JWTUtil initialized with secret length: %d", len(secretKey))
+	return &JWTUtil{
+		secretKey: []byte(secretKey),
+		expiresIn: expiresIn,
+	}
+}
+
+func (j *JWTUtil) GenerateToken(userID uuid.UUID, email string) (string, error) {
+	now := time.Now()
+
+	// РСЃРїРѕР»СЊР·СѓРµРј MapClaims РІРјРµСЃС‚Рѕ РєР°СЃС‚РѕРјРЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂС‹
+	claims := jwt.MapClaims{
+		"user_id": userID.String(),
+		"email":   email,
+		"exp":     now.Add(j.expiresIn).Unix(),
+		"iat":     now.Unix(),
+		"nbf":     now.Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signedToken, err := token.SignedString(j.secretKey)
+
+	if err != nil {
+		log.Printf("Error generating token: %v", err)
+		return "", err
+	}
+
+	log.Printf("Generated token for user %s", userID)
+	return signedToken, nil
+}
+
+func (j *JWTUtil) ValidateToken(tokenString string) (*jwt.Token, error) {
+	log.Printf("Validating token: %s", tokenString)
+
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// РџСЂРѕРІРµСЂСЏРµРј РјРµС‚РѕРґ РїРѕРґРїРёСЃРё
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			log.Printf("Unexpected signing method: %v", token.Header["alg"])
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return j.secretKey, nil
+	})
+
+	if err != nil {
+		log.Printf("Token parse error: %v", err)
+		return nil, err
+	}
+
+	log.Printf("Token validated successfully")
+	return token, nil
+}
+
+

@@ -1,9 +1,10 @@
-﻿package handlers
+package handlers
 
 import (
 	"cloud-storage-go/internal/middleware"
 	"cloud-storage-go/internal/models"
 	"cloud-storage-go/internal/services"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -22,6 +23,34 @@ func NewFileHandler(fileService *services.FileService) *FileHandler {
 	}
 }
 
+// internal/handlers/file_handler.go
+// QuickMoveToLibrary - быстрое перемещение в библиотеку
+func (h *FileHandler) QuickMoveToLibrary(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	fileID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var req struct {
+		LibraryParentID *uuid.UUID `json:"library_parent_id"`
+	}
+	c.ShouldBindJSON(&req)
+
+	item, err := h.fileService.MoveToLibrary(userID, fileID, req.LibraryParentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, item)
+}
 func (h *FileHandler) UploadFile(c *gin.Context) {
 	userID, exists := middleware.GetUserID(c)
 	if !exists {
@@ -263,4 +292,57 @@ func (h *FileHandler) MoveFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "file moved successfully"})
+}
+
+// BulkMoveToLibrary - массовое перемещение в библиотеку
+// POST /api/files/bulk-move-to-library
+func (h *FileHandler) BulkMoveToLibrary(c *gin.Context) {
+	userID, exists := middleware.GetUserID(c)
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		ItemIDs         []uuid.UUID `json:"item_ids" binding:"required"`
+		LibraryParentID *uuid.UUID  `json:"library_parent_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var results []map[string]interface{}
+	var errors []string
+
+	for _, itemID := range req.ItemIDs {
+		item, err := h.fileService.MoveToLibrary(userID, itemID, req.LibraryParentID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("item %s: %v", itemID, err.Error()))
+			results = append(results, map[string]interface{}{
+				"item_id": itemID,
+				"status":  "error",
+				"error":   err.Error(),
+			})
+		} else {
+			results = append(results, map[string]interface{}{
+				"item_id":      itemID,
+				"status":       "success",
+				"library_item": item,
+			})
+		}
+	}
+
+	status := http.StatusOK
+	if len(errors) > 0 {
+		status = http.StatusPartialContent
+	}
+
+	c.JSON(status, gin.H{
+		"results":       results,
+		"total":         len(req.ItemIDs),
+		"success_count": len(req.ItemIDs) - len(errors),
+		"error_count":   len(errors),
+		"errors":        errors,
+	})
 }
