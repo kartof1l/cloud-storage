@@ -308,7 +308,7 @@ func setupRouter(
 		protected.PUT("/user/me", rateLimitMiddleware(apiLimiter), userHandler.UpdateProfile)
 		protected.POST("/user/avatar", rateLimitMiddleware(uploadLimiter), userHandler.UploadAvatar)
 
-		// Library
+		// Library aaaaaa
 		library := protected.Group("/library")
 		{
 			library.GET("/items", rateLimitMiddleware(apiLimiter), libraryHandler.GetItems)
