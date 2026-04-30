@@ -1,4 +1,4 @@
-﻿package services
+package services
 
 import (
 	"errors"
@@ -33,33 +33,36 @@ type FileService struct {
 	storageService *StorageService
 	auditService   *AuditService
 	userRepo       *repository.UserRepository
+	libraryService *LibraryService
 }
 
-func NewFileService(fileRepo *repository.FileRepository, storageService *StorageService, auditService *AuditService, userRepo *repository.UserRepository) *FileService {
+func NewFileService(
+	fileRepo *repository.FileRepository,
+	storageService *StorageService,
+	auditService *AuditService,
+	userRepo *repository.UserRepository,
+	libraryService *LibraryService,
+) *FileService {
 	return &FileService{
 		fileRepo:       fileRepo,
 		storageService: storageService,
 		auditService:   auditService,
 		userRepo:       userRepo,
+		libraryService: libraryService,
 	}
 }
 
-// getUserDir - возвращает путь к папке пользователя
 func (s *FileService) getUserDir(userID uuid.UUID) string {
 	return filepath.Join(s.storageService.basePath, "users", userID.String())
 }
+
 func ValidateFile(filename string, size int64, mimeType string, maxSize int64) error {
-	// Проверка размера
 	if size > maxSize {
 		return errors.New("file size exceeds limit")
 	}
-
-	// Проверка MIME типа
 	if !allowedMimeTypes[mimeType] {
 		return errors.New("file type not allowed")
 	}
-
-	// Проверка расширения
 	ext := strings.ToLower(filepath.Ext(filename))
 	allowedExts := []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".pdf", ".txt", ".doc", ".docx"}
 	allowed := false
@@ -72,29 +75,22 @@ func ValidateFile(filename string, size int64, mimeType string, maxSize int64) e
 	if !allowed {
 		return errors.New("file extension not allowed")
 	}
-
-	// Проверка на опасные имена файлов
 	if strings.Contains(filename, "..") || strings.Contains(filename, "/") || strings.Contains(filename, "\\") {
 		return errors.New("invalid filename")
 	}
-
 	return nil
 }
 
 // ==================== MOVE OPERATIONS ====================
 
-// MoveFile - перемещение файла в другую папку
 func (s *FileService) MoveFile(userID uuid.UUID, fileID uuid.UUID, newParentID *uuid.UUID) error {
 	file, err := s.fileRepo.GetByID(fileID)
 	if err != nil {
 		return err
 	}
-
 	if file.UserID != userID {
 		return errors.New("access denied")
 	}
-
-	// Проверяем целевую папку
 	if newParentID != nil {
 		parent, err := s.fileRepo.GetByID(*newParentID)
 		if err != nil {
@@ -106,47 +102,36 @@ func (s *FileService) MoveFile(userID uuid.UUID, fileID uuid.UUID, newParentID *
 		if !parent.IsFolder {
 			return errors.New("target is not a folder")
 		}
-		// Проверяем, что не пытаемся переместить папку в саму себя
 		if file.IsFolder && fileID == *newParentID {
 			return errors.New("cannot move folder into itself")
 		}
 	}
-
 	oldParentID := file.ParentFolderID
 	file.ParentFolderID = newParentID
 	file.UpdatedAt = time.Now()
-
 	if err := s.fileRepo.Update(file); err != nil {
 		return err
 	}
-
-	// Обновляем размеры папок
 	if oldParentID != nil {
 		go s.updateFolderSizeRecursive(*oldParentID)
 	}
 	if newParentID != nil {
 		go s.updateFolderSizeRecursive(*newParentID)
 	}
-
 	return nil
 }
 
-// MoveFolder - перемещение папки
 func (s *FileService) MoveFolder(userID uuid.UUID, folderID uuid.UUID, newParentID *uuid.UUID) error {
 	folder, err := s.fileRepo.GetByID(folderID)
 	if err != nil {
 		return err
 	}
-
 	if folder.UserID != userID {
 		return errors.New("access denied")
 	}
-
 	if !folder.IsFolder {
 		return errors.New("not a folder")
 	}
-
-	// Проверяем целевую папку
 	if newParentID != nil {
 		parent, err := s.fileRepo.GetByID(*newParentID)
 		if err != nil {
@@ -158,42 +143,33 @@ func (s *FileService) MoveFolder(userID uuid.UUID, folderID uuid.UUID, newParent
 		if !parent.IsFolder {
 			return errors.New("target is not a folder")
 		}
-		// Проверяем, что не пытаемся переместить папку в саму себя или в дочернюю
 		if folderID == *newParentID {
 			return errors.New("cannot move folder into itself")
 		}
-		// Проверяем циклическую ссылку
 		if s.isChildFolder(folderID, *newParentID) {
 			return errors.New("cannot move folder into its own subfolder")
 		}
 	}
-
 	oldParentID := folder.ParentFolderID
 	folder.ParentFolderID = newParentID
 	folder.UpdatedAt = time.Now()
-
 	if err := s.fileRepo.Update(folder); err != nil {
 		return err
 	}
-
-	// Обновляем размеры папок
 	if oldParentID != nil {
 		go s.updateFolderSizeRecursive(*oldParentID)
 	}
 	if newParentID != nil {
 		go s.updateFolderSizeRecursive(*newParentID)
 	}
-
 	return nil
 }
 
-// isChildFolder - проверяет, является ли folderID дочерним по отношению к targetID
 func (s *FileService) isChildFolder(folderID, targetID uuid.UUID) bool {
 	current, err := s.fileRepo.GetByID(targetID)
 	if err != nil {
 		return false
 	}
-
 	for current.ParentFolderID != nil {
 		if *current.ParentFolderID == folderID {
 			return true
@@ -206,23 +182,21 @@ func (s *FileService) isChildFolder(folderID, targetID uuid.UUID) bool {
 	return false
 }
 
-// UploadFile - загрузка файла
+// ==================== UPLOAD / CREATE ====================
+
 func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
 	filename string, fileData io.Reader, size int64, ip, userAgent string) (*models.FileUploadResponse, error) {
 
 	userDir := s.getUserDir(userID)
-
 	var targetPath string
 	if parentFolderID != nil {
 		parent, err := s.fileRepo.GetByID(*parentFolderID)
 		if err != nil {
 			return nil, fmt.Errorf("parent folder not found: %v", err)
 		}
-		// Проверяем, что это папка
 		if !parent.IsFolder {
 			return nil, errors.New("parent is not a folder")
 		}
-		// Проверяем права доступа
 		if parent.UserID != userID {
 			return nil, errors.New("access denied to parent folder")
 		}
@@ -230,34 +204,26 @@ func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
 	} else {
 		targetPath = userDir
 	}
-
-	// Создаем директорию если её нет
 	if err := os.MkdirAll(targetPath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create directory: %v", err)
 	}
-
 	ext := filepath.Ext(filename)
 	storedName := uuid.New().String() + ext
 	filePath := filepath.Join(targetPath, storedName)
-
-	// Создаем и сохраняем файл
 	dst, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %v", err)
 	}
 	defer dst.Close()
-
 	written, err := io.Copy(dst, fileData)
 	if err != nil {
 		os.Remove(filePath)
 		return nil, fmt.Errorf("failed to write file: %v", err)
 	}
-
 	mimeType := mime.TypeByExtension(ext)
 	if mimeType == "" {
 		mimeType = "application/octet-stream"
 	}
-
 	now := time.Now()
 	file := &models.File{
 		ID:             uuid.New(),
@@ -272,13 +238,10 @@ func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-
 	if err := s.fileRepo.Create(file); err != nil {
 		os.Remove(filePath)
 		return nil, fmt.Errorf("failed to save to database: %v", err)
 	}
-
-	// Обновляем размер родительской папки
 	if parentFolderID != nil {
 		go func() {
 			if err := s.updateFolderSizeRecursive(*parentFolderID); err != nil {
@@ -286,16 +249,13 @@ func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
 			}
 		}()
 	}
-
-	// Аудит
 	if s.auditService != nil {
 		user, _ := s.userRepo.GetByID(userID)
 		if user != nil {
 			go s.auditService.Log(userID, user.Email, "upload", "file", &file.ID, filename,
-				fmt.Sprintf("Файл загружен в папку %v", parentFolderID), ip, userAgent)
+				fmt.Sprintf("file uploaded to %v", parentFolderID), ip, userAgent)
 		}
 	}
-
 	return &models.FileUploadResponse{
 		ID:        file.ID,
 		Name:      filename,
@@ -305,12 +265,9 @@ func (s *FileService) UploadFile(userID uuid.UUID, parentFolderID *uuid.UUID,
 	}, nil
 }
 
-// CreateFolder - создание папки
 func (s *FileService) CreateFolder(userID uuid.UUID, name string, parentFolderID *uuid.UUID, ip, userAgent string) (*models.File, error) {
 	now := time.Now()
-
 	userDir := s.getUserDir(userID)
-
 	var folderPath string
 	if parentFolderID != nil {
 		parent, err := s.fileRepo.GetByID(*parentFolderID)
@@ -321,11 +278,9 @@ func (s *FileService) CreateFolder(userID uuid.UUID, name string, parentFolderID
 	} else {
 		folderPath = filepath.Join(userDir, name+"_"+uuid.New().String())
 	}
-
 	if err := os.MkdirAll(folderPath, 0755); err != nil {
 		return nil, err
 	}
-
 	folder := &models.File{
 		ID:             uuid.New(),
 		UserID:         userID,
@@ -340,43 +295,33 @@ func (s *FileService) CreateFolder(userID uuid.UUID, name string, parentFolderID
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
-
 	if err := s.fileRepo.Create(folder); err != nil {
 		os.RemoveAll(folderPath)
 		return nil, err
 	}
-
-	// Обновляем размер родительской папки
 	if parentFolderID != nil {
 		go s.updateFolderSizeRecursive(*parentFolderID)
 	}
-
-	// Аудит
 	if s.auditService != nil {
 		user, _ := s.userRepo.GetByID(userID)
 		if user != nil {
 			go s.auditService.Log(userID, user.Email, "create_folder", "folder", &folder.ID, name,
-				"Папка создана", ip, userAgent)
+				"folder created", ip, userAgent)
 		}
 	}
-
 	return folder, nil
 }
 
 // ==================== GET / LIST ====================
 
-// GetUserFiles - получение файлов пользователя
 func (s *FileService) GetUserFiles(userID uuid.UUID, parentFolderID *uuid.UUID, page, limit int) ([]models.File, int64, error) {
 	files, total, err := s.fileRepo.GetByUserID(userID, parentFolderID, page, limit)
 	if err != nil {
 		return nil, 0, err
 	}
-
-	// Для папок подставляем folder_size вместо size
 	for i := range files {
 		if files[i].IsFolder {
 			if files[i].FolderSize == 0 && files[i].ID != uuid.Nil {
-				// Получаем размер из базы
 				size, err := s.fileRepo.GetFolderSize(files[i].ID)
 				if err == nil && size > 0 {
 					files[i].FolderSize = size
@@ -385,27 +330,18 @@ func (s *FileService) GetUserFiles(userID uuid.UUID, parentFolderID *uuid.UUID, 
 			files[i].Size = files[i].FolderSize
 		}
 	}
-
 	return files, total, nil
 }
 
-// GetFileByID - получение файла по ID
 func (s *FileService) GetFileByID(fileID uuid.UUID) (*models.File, error) {
 	return s.fileRepo.GetByID(fileID)
 }
 
-// GetFileContent - получение содержимого файла
-func (s *FileService) GetFileContent(filePath string) (*os.File, error) {
-	return os.Open(filePath)
-}
-
-// GetUserStorageStats - получение статистики хранилища (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ)
 func (s *FileService) GetUserStorageStats(userID uuid.UUID) (map[string]interface{}, error) {
 	totalSize, fileCount, folderCount, err := s.fileRepo.GetUserStorageStats(userID)
 	if err != nil {
 		return nil, err
 	}
-
 	return map[string]interface{}{
 		"total_size":   totalSize,
 		"file_count":   fileCount,
@@ -414,161 +350,172 @@ func (s *FileService) GetUserStorageStats(userID uuid.UUID) (map[string]interfac
 	}, nil
 }
 
-// GetFolderContentsWithSize - получение содержимого папки с размерами
-func (s *FileService) GetFolderContentsWithSize(userID uuid.UUID, folderID *uuid.UUID) ([]models.File, error) {
-	files, _, err := s.fileRepo.GetByUserID(userID, folderID, 1, 1000)
-	if err != nil {
-		return nil, err
-	}
-
-	for i := range files {
-		if files[i].IsFolder {
-			size, err := s.fileRepo.GetFolderSize(files[i].ID)
-			if err == nil {
-				files[i].Size = size
-			}
-		}
-	}
-
-	return files, nil
-}
-
 // ==================== UPDATE / RENAME ====================
 
-// RenameFile - переименование файла
 func (s *FileService) RenameFile(userID uuid.UUID, fileID uuid.UUID, newName string) error {
 	file, err := s.fileRepo.GetByID(fileID)
 	if err != nil {
 		return err
 	}
-
 	if file.UserID != userID {
 		return errors.New("access denied")
 	}
-
 	file.Name = newName
 	file.OriginalName = newName
 	file.UpdatedAt = time.Now()
-
 	return s.fileRepo.Update(file)
 }
 
-// RenameFolder - переименование папки
 func (s *FileService) RenameFolder(userID uuid.UUID, folderID uuid.UUID, newName string) error {
 	folder, err := s.fileRepo.GetByID(folderID)
 	if err != nil {
 		return err
 	}
-
 	if folder.UserID != userID {
 		return errors.New("access denied")
 	}
-
 	if !folder.IsFolder {
 		return errors.New("not a folder")
 	}
-
 	folder.Name = newName
 	folder.OriginalName = newName
 	folder.UpdatedAt = time.Now()
-
 	return s.fileRepo.Update(folder)
 }
 
 // ==================== DELETE ====================
 
-// DeleteFile - удаление файла
 func (s *FileService) DeleteFile(userID uuid.UUID, fileID uuid.UUID, ip, userAgent string) error {
 	file, err := s.fileRepo.GetByID(fileID)
 	if err != nil {
 		return err
 	}
-
 	if file.UserID != userID {
 		return errors.New("access denied")
 	}
-
 	parentID := file.ParentFolderID
-
 	if !file.IsFolder && file.Path != "" {
 		if err := s.storageService.DeleteFile(file.Path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-
 	if err := s.fileRepo.Delete(fileID); err != nil {
 		return err
 	}
-
-	// Обновляем размер родительской папки
 	if parentID != nil {
 		go s.updateFolderSizeRecursive(*parentID)
 	}
-
-	// Аудит
 	if s.auditService != nil {
 		user, _ := s.userRepo.GetByID(userID)
 		if user != nil {
 			go s.auditService.Log(userID, user.Email, "delete", "file", &fileID, file.Name,
-				"Файл удален", ip, userAgent)
+				"file deleted", ip, userAgent)
 		}
 	}
-
 	return nil
 }
 
-// DeleteFolder - удаление папки
 func (s *FileService) DeleteFolder(userID uuid.UUID, folderID uuid.UUID, ip, userAgent string) error {
 	folder, err := s.fileRepo.GetByID(folderID)
 	if err != nil {
 		return err
 	}
-
 	if folder.UserID != userID {
 		return errors.New("access denied")
 	}
-
 	if !folder.IsFolder {
 		return errors.New("not a folder")
 	}
-
 	parentID := folder.ParentFolderID
-
 	if folder.Path != "" {
 		if err := os.RemoveAll(folder.Path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-
 	if err := s.fileRepo.Delete(folderID); err != nil {
 		return err
 	}
-
-	// Обновляем размер родительской папки
 	if parentID != nil {
 		go s.updateFolderSizeRecursive(*parentID)
 	}
-
-	// Аудит
 	if s.auditService != nil {
 		user, _ := s.userRepo.GetByID(userID)
 		if user != nil {
 			go s.auditService.Log(userID, user.Email, "delete_folder", "folder", &folderID, folder.Name,
-				"Папка удалена", ip, userAgent)
+				"folder deleted", ip, userAgent)
 		}
 	}
-
 	return nil
 }
 
 // ==================== SIZE CALCULATION ====================
 
-// updateFolderSizeRecursive - обновляет размер папки и всех родителей
 func (s *FileService) updateFolderSizeRecursive(folderID uuid.UUID) error {
-	// Используем оптимизированный метод репозитория
 	err := s.fileRepo.UpdateFolderSizeRecursive(folderID)
 	if err != nil {
 		log.Printf("Error updating folder size for %s: %v", folderID, err)
 	}
 	return err
+}
+
+// ==================== MOVE TO LIBRARY ====================
+
+func (s *FileService) MoveToLibrary(userID uuid.UUID, itemID uuid.UUID, libraryParentID *uuid.UUID) (*repository.LibraryItem, error) {
+	item, err := s.fileRepo.GetByID(itemID)
+	if err != nil {
+		return nil, fmt.Errorf("item not found: %v", err)
+	}
+
+	if item.UserID != userID {
+		return nil, errors.New("access denied")
+	}
+
+	if err := s.libraryService.CheckAdmin(userID); err != nil {
+		return nil, fmt.Errorf("admin access required: %v", err)
+	}
+
+	if item.IsFolder {
+		return s.moveFolderToLibrary(userID, item, libraryParentID)
+	}
+	return s.moveFileToLibrary(userID, item, libraryParentID)
+}
+
+func (s *FileService) moveFileToLibrary(userID uuid.UUID, file *models.File, libraryParentID *uuid.UUID) (*repository.LibraryItem, error) {
+	srcFile, err := os.Open(file.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer srcFile.Close()
+
+	item, err := s.libraryService.UploadFile(userID, libraryParentID, file.OriginalName, srcFile, file.Size, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	s.DeleteFile(userID, file.ID, "", "")
+	return item, nil
+}
+
+func (s *FileService) moveFolderToLibrary(userID uuid.UUID, folder *models.File, libraryParentID *uuid.UUID) (*repository.LibraryItem, error) {
+	libFolder, err := s.libraryService.CreateFolder(userID, folder.OriginalName, libraryParentID, "", "")
+	if err != nil {
+		return nil, err
+	}
+
+	children, err := s.fileRepo.GetFolderChildren(folder.ID)
+	if err != nil {
+		s.libraryService.DeleteItem(userID, libFolder.ID, "", "")
+		return nil, err
+	}
+
+	for _, child := range children {
+		if child.IsFolder {
+			s.moveFolderToLibrary(userID, &child, &libFolder.ID)
+		} else {
+			s.moveFileToLibrary(userID, &child, &libFolder.ID)
+		}
+	}
+
+	s.DeleteFolder(userID, folder.ID, "", "")
+	return libFolder, nil
 }
